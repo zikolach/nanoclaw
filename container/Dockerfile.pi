@@ -1,0 +1,25 @@
+FROM node:22-slim
+
+RUN apt-get update && apt-get install -y \
+    bash \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pi-agent-runner/package*.json ./
+RUN npm install
+
+COPY pi-agent-runner/ ./
+RUN npm run build
+
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input /home/node/.pi/agent
+
+RUN printf '#!/bin/bash\nset -e\ncd /app && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/node_modules /tmp/dist/node_modules\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+RUN chown -R node:node /workspace /home/node && chmod 777 /home/node
+
+USER node
+WORKDIR /workspace/group
+ENTRYPOINT ["/app/entrypoint.sh"]

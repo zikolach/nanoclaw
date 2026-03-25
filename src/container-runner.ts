@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AGENT_RUNTIME,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -14,6 +15,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   ONECLI_URL,
+  PI_CONTAINER_IMAGE,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -25,6 +27,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { OneCLI } from '@onecli-sh/sdk';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -115,19 +118,15 @@ function buildVolumeMounts(
     }
   }
 
-  // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
+  // Per-group agent data directories (isolated from other groups)
+  const groupDataDir = path.join(DATA_DIR, 'sessions', group.folder);
+
+  const groupClaudeDir = path.join(groupDataDir, '.claude');
+  fs.mkdirSync(groupClaudeDir, { recursive: true });
+  const claudeSettingsFile = path.join(groupClaudeDir, 'settings.json');
+  if (!fs.existsSync(claudeSettingsFile)) {
     fs.writeFileSync(
-      settingsFile,
+      claudeSettingsFile,
       JSON.stringify(
         {
           env: {
@@ -150,7 +149,7 @@ function buildVolumeMounts(
 
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
+  const skillsDst = path.join(groupClaudeDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
@@ -160,10 +159,34 @@ function buildVolumeMounts(
     }
   }
   mounts.push({
-    hostPath: groupSessionsDir,
+    hostPath: groupClaudeDir,
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+
+  if (AGENT_RUNTIME === 'pi') {
+    const groupPiAgentDir = path.join(groupDataDir, '.pi-agent');
+    fs.mkdirSync(groupPiAgentDir, { recursive: true });
+    mounts.push({
+      hostPath: groupPiAgentDir,
+      containerPath: '/home/node/.pi/agent',
+      readonly: false,
+    });
+
+    const hostPiAuth = path.join(
+      process.env.HOME || '',
+      '.pi',
+      'agent',
+      'auth.json',
+    );
+    if (process.env.HOME && fs.existsSync(hostPiAuth)) {
+      mounts.push({
+        hostPath: hostPiAuth,
+        containerPath: '/home/node/.pi/agent/auth.json',
+        readonly: true,
+      });
+    }
+  }
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
@@ -183,14 +206,14 @@ function buildVolumeMounts(
   const agentRunnerSrc = path.join(
     projectRoot,
     'container',
-    'agent-runner',
+    AGENT_RUNTIME === 'pi' ? 'pi-agent-runner' : 'agent-runner',
     'src',
   );
   const groupAgentRunnerDir = path.join(
     DATA_DIR,
     'sessions',
     group.folder,
-    'agent-runner-src',
+    AGENT_RUNTIME === 'pi' ? 'pi-agent-runner-src' : 'agent-runner-src',
   );
   if (fs.existsSync(agentRunnerSrc)) {
     const srcIndex = path.join(agentRunnerSrc, 'index.ts');
@@ -233,19 +256,53 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
-  if (onecliApplied) {
-    logger.info({ containerName }, 'OneCLI gateway config applied');
-  } else {
+  if (AGENT_RUNTIME === 'pi') {
+    const envConfig = readEnvFile([
+      'PI_API_KEY',
+      'PI_BASE_URL',
+      'PI_CONTEXT_WINDOW',
+      'PI_MAX_TOKENS',
+      'PI_MODEL',
+      'PI_PROVIDER',
+      'PI_REASONING',
+      'PI_THINKING_LEVEL',
+    ]);
+    const piEnv = {
+      PI_API_KEY: process.env.PI_API_KEY || envConfig.PI_API_KEY,
+      PI_BASE_URL: process.env.PI_BASE_URL || envConfig.PI_BASE_URL,
+      PI_CONTEXT_WINDOW:
+        process.env.PI_CONTEXT_WINDOW || envConfig.PI_CONTEXT_WINDOW,
+      PI_MAX_TOKENS: process.env.PI_MAX_TOKENS || envConfig.PI_MAX_TOKENS,
+      PI_MODEL: process.env.PI_MODEL || envConfig.PI_MODEL,
+      PI_PROVIDER: process.env.PI_PROVIDER || envConfig.PI_PROVIDER,
+      PI_REASONING: process.env.PI_REASONING || envConfig.PI_REASONING,
+      PI_THINKING_LEVEL:
+        process.env.PI_THINKING_LEVEL || envConfig.PI_THINKING_LEVEL,
+    };
+
+    for (const [key, value] of Object.entries(piEnv)) {
+      if (value) args.push('-e', `${key}=${value}`);
+    }
+
     logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
+      { containerName, model: piEnv.PI_MODEL, runtime: AGENT_RUNTIME },
+      'Using experimental Pi container runtime',
     );
+  } else {
+    // OneCLI gateway handles credential injection — containers never see real secrets.
+    // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
+    const onecliApplied = await onecli.applyContainerConfig(args, {
+      addHostMapping: false, // Nanoclaw already handles host gateway
+      agent: agentIdentifier,
+    });
+    if (onecliApplied) {
+      logger.info({ containerName }, 'OneCLI gateway config applied');
+    } else {
+      logger.warn(
+        { containerName },
+        'OneCLI gateway not reachable — container will have no credentials',
+      );
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -269,7 +326,7 @@ async function buildContainerArgs(
     }
   }
 
-  args.push(CONTAINER_IMAGE);
+  args.push(AGENT_RUNTIME === 'pi' ? PI_CONTAINER_IMAGE : CONTAINER_IMAGE);
 
   return args;
 }

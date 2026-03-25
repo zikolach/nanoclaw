@@ -1,0 +1,82 @@
+# Pi runtime proof of concept
+
+This is a **Phase 1 proof of concept** for running NanoClaw with the Pi coding agent in containers.
+
+## Status
+
+Implemented:
+
+- runtime switch via `AGENT_RUNTIME=pi`
+- separate Pi container image selection via `PI_CONTAINER_IMAGE`
+- env-driven Pi model/provider bootstrap for OpenAI-compatible endpoints
+- durable Pi session resume across container restarts using Pi session files
+- long-lived Pi container loop with NanoClaw IPC input polling between prompts
+
+Not implemented yet:
+
+- scheduled tasks
+- NanoClaw-specific tool parity
+- compaction/transcript parity
+
+## Phase 2 / 4 validation
+
+Validated directly against the Pi container runtime:
+
+- first run creates a Pi session file
+- second run with the returned `sessionId` reopens that session
+- memory persisted across restarts in local-provider mode
+- runner now stays alive after a prompt and waits for new IPC input files
+- queued IPC messages are processed as subsequent prompts in the same live container session
+
+## Runtime modes
+
+The current PoC supports two Pi connection modes.
+
+### 1. Local/custom OpenAI-compatible provider
+
+Use this for llamabarn or another local OpenAI-compatible endpoint:
+
+```bash
+AGENT_RUNTIME=pi
+PI_CONTAINER_IMAGE=nanoclaw-agent-pi:latest
+PI_BASE_URL=http://host.docker.internal:2276/v1
+PI_PROVIDER=llamabarn
+PI_MODEL=my-model-id
+PI_API_KEY=some-key
+```
+
+### 2. Built-in Pi provider: OpenAI Codex
+
+Use this for a host Pi login with ChatGPT Plus/Pro credentials stored in `~/.pi/agent/auth.json`:
+
+```bash
+AGENT_RUNTIME=pi
+PI_CONTAINER_IMAGE=nanoclaw-agent-pi:latest
+PI_PROVIDER=openai-codex
+PI_MODEL=gpt-5.2-codex
+```
+
+If `PI_MODEL` is omitted in Codex mode, the PoC defaults to `gpt-5.2-codex`.
+
+Optional for either mode:
+
+```bash
+PI_CONTEXT_WINDOW=64000
+PI_MAX_TOKENS=8192
+PI_THINKING_LEVEL=medium
+PI_REASONING=false
+```
+
+## Build the Pi image
+
+```bash
+./container/build-pi.sh
+```
+
+## Notes
+
+- In local/custom mode, `PI_BASE_URL` should point to the API root ending in `/v1`.
+- In Codex mode, NanoClaw mounts the host `~/.pi/agent/auth.json` into the Pi container read-only so the container can use the host's Pi login.
+- The host runtime still uses NanoClaw's existing orchestration. Only the container-side agent engine is swapped.
+- The Pi runtime now stores per-group session files under the mounted Pi agent directory and returns the session file path as NanoClaw's `sessionId` token.
+- On the next container start, NanoClaw passes that path back into the Pi runner, which reopens the same Pi session file.
