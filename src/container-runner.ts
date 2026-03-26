@@ -15,6 +15,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   ONECLI_URL,
+  PI_AUTH_MODE,
   PI_CONTAINER_IMAGE,
   TIMEZONE,
 } from './config.js';
@@ -262,6 +263,7 @@ async function buildContainerArgs(
   if (AGENT_RUNTIME === 'pi') {
     const envConfig = readEnvFile([
       'PI_API_KEY',
+      'PI_AUTH_MODE',
       'PI_BASE_URL',
       'PI_CONTEXT_WINDOW',
       'PI_MAX_TOKENS',
@@ -272,6 +274,7 @@ async function buildContainerArgs(
     ]);
     const piEnv = {
       PI_API_KEY: process.env.PI_API_KEY || envConfig.PI_API_KEY,
+      PI_AUTH_MODE: process.env.PI_AUTH_MODE || envConfig.PI_AUTH_MODE,
       PI_BASE_URL: process.env.PI_BASE_URL || envConfig.PI_BASE_URL,
       PI_CONTEXT_WINDOW:
         process.env.PI_CONTEXT_WINDOW || envConfig.PI_CONTEXT_WINDOW,
@@ -287,8 +290,28 @@ async function buildContainerArgs(
       if (value) args.push('-e', `${key}=${value}`);
     }
 
+    if ((piEnv.PI_AUTH_MODE || PI_AUTH_MODE) === 'onecli') {
+      const onecliApplied = await onecli.applyContainerConfig(args, {
+        addHostMapping: false,
+        agent: agentIdentifier,
+      });
+      if (onecliApplied) {
+        logger.info({ containerName }, 'OneCLI gateway config applied for Pi');
+      } else {
+        logger.warn(
+          { containerName },
+          'OneCLI gateway not reachable for Pi container',
+        );
+      }
+    }
+
     logger.warn(
-      { containerName, model: piEnv.PI_MODEL, runtime: AGENT_RUNTIME },
+      {
+        authMode: piEnv.PI_AUTH_MODE || PI_AUTH_MODE,
+        containerName,
+        model: piEnv.PI_MODEL,
+        runtime: AGENT_RUNTIME,
+      },
       'Using experimental Pi container runtime',
     );
   } else {

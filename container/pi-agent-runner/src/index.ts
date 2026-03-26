@@ -34,6 +34,7 @@ interface ContainerOutput {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 const DEFAULT_PROVIDER = 'nanoclaw';
+const DEFAULT_ONECLI_PROVIDER = 'anthropic';
 const DEFAULT_THINKING_LEVEL = 'medium' as const;
 const IPC_DIR = '/workspace/ipc';
 const IPC_INPUT_DIR = path.join(IPC_DIR, 'input');
@@ -44,6 +45,7 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+type PiAuthMode = 'native' | 'onecli';
 
 interface ScriptResult {
   wakeAgent: boolean;
@@ -93,6 +95,10 @@ function getThinkingLevel(): ThinkingLevel {
     default:
       return DEFAULT_THINKING_LEVEL;
   }
+}
+
+function getPiAuthMode(): PiAuthMode {
+  return process.env.PI_AUTH_MODE === 'onecli' ? 'onecli' : 'native';
 }
 
 function shouldClose(): boolean {
@@ -201,6 +207,31 @@ function parseCompactCommand(prompt: string): {
     isCompact: true,
     instructions: instructions || undefined,
   };
+}
+
+function getOneCliDummyApiKeyEnv(
+  provider: string,
+): { envName: string; value: string } | undefined {
+  switch (provider) {
+    case 'anthropic':
+      return { envName: 'ANTHROPIC_API_KEY', value: 'onecli-proxy' };
+    case 'openai':
+      return { envName: 'OPENAI_API_KEY', value: 'onecli-proxy' };
+    case 'google':
+      return { envName: 'GEMINI_API_KEY', value: 'onecli-proxy' };
+    case 'mistral':
+      return { envName: 'MISTRAL_API_KEY', value: 'onecli-proxy' };
+    case 'groq':
+      return { envName: 'GROQ_API_KEY', value: 'onecli-proxy' };
+    case 'cerebras':
+      return { envName: 'CEREBRAS_API_KEY', value: 'onecli-proxy' };
+    case 'xai':
+      return { envName: 'XAI_API_KEY', value: 'onecli-proxy' };
+    case 'openrouter':
+      return { envName: 'OPENROUTER_API_KEY', value: 'onecli-proxy' };
+    default:
+      return undefined;
+  }
 }
 
 function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
@@ -598,15 +629,20 @@ async function runScript(script: string): Promise<ScriptResult | null> {
 }
 
 function writePiConfig(): {
+  authMode: PiAuthMode;
   provider: string;
   model: string;
   agentDir: string;
   sessionsDir: string;
   modelsPath?: string;
   thinkingLevel: ThinkingLevel;
-  mode: 'custom-base-url' | 'builtin-provider';
+  mode: 'custom-base-url' | 'builtin-provider' | 'onecli-builtin-provider';
+  dummyApiKeyEnv?: { envName: string; value: string };
 } {
-  const provider = getOptionalEnv('PI_PROVIDER') || DEFAULT_PROVIDER;
+  const authMode = getPiAuthMode();
+  const provider =
+    getOptionalEnv('PI_PROVIDER') ||
+    (authMode === 'onecli' ? DEFAULT_ONECLI_PROVIDER : DEFAULT_PROVIDER);
   const baseUrl = getOptionalEnv('PI_BASE_URL');
   const model =
     getOptionalEnv('PI_MODEL') ||
@@ -627,6 +663,53 @@ function writePiConfig(): {
 
   fs.mkdirSync(agentDir, { recursive: true });
   fs.mkdirSync(sessionsDir, { recursive: true });
+
+  if (authMode === 'onecli') {
+    if (baseUrl) {
+      throw new Error(
+        'PI_AUTH_MODE=onecli does not support PI_BASE_URL; use PI_AUTH_MODE=native for custom endpoints',
+      );
+    }
+
+    if (provider === 'openai-codex') {
+      throw new Error(
+        'PI_AUTH_MODE=onecli does not currently support PI_PROVIDER=openai-codex; use an API-key provider like anthropic/openai or switch to PI_AUTH_MODE=native',
+      );
+    }
+
+    const dummyApiKeyEnv = getOneCliDummyApiKeyEnv(provider);
+    if (!dummyApiKeyEnv) {
+      throw new Error(
+        `PI_AUTH_MODE=onecli does not support provider ${provider}; use a supported API-key provider or switch to PI_AUTH_MODE=native`,
+      );
+    }
+
+    process.env[dummyApiKeyEnv.envName] = dummyApiKeyEnv.value;
+
+    const settingsConfig = {
+      defaultProvider: provider,
+      defaultModel: model,
+      defaultThinkingLevel: thinkingLevel,
+      lastChangelogVersion: 'phase-1-poc',
+      compaction: { enabled: false },
+    };
+
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify(settingsConfig, null, 2) + '\n',
+    );
+
+    return {
+      authMode,
+      provider,
+      model,
+      agentDir,
+      sessionsDir,
+      thinkingLevel,
+      mode: 'onecli-builtin-provider',
+      dummyApiKeyEnv,
+    };
+  }
 
   if (baseUrl) {
     const modelsPath = path.join(agentDir, 'models.json');
@@ -668,6 +751,7 @@ function writePiConfig(): {
     );
 
     return {
+      authMode,
       provider,
       model,
       agentDir,
@@ -692,6 +776,7 @@ function writePiConfig(): {
   );
 
   return {
+    authMode,
     provider,
     model,
     agentDir,
@@ -722,6 +807,7 @@ async function main(): Promise<void> {
     const stdinData = await readStdin();
     const input: ContainerInput = JSON.parse(stdinData);
     const {
+      authMode,
       provider,
       model,
       agentDir,
@@ -729,7 +815,10 @@ async function main(): Promise<void> {
       modelsPath,
       mode,
       thinkingLevel,
+      dummyApiKeyEnv,
     } = writePiConfig();
+
+    log(`Pi auth mode: ${authMode}`);
 
     if (input.isScheduledTask) {
       log('Running in scheduled task mode');
@@ -746,8 +835,15 @@ async function main(): Promise<void> {
     if (process.env.PI_API_KEY) {
       authStorage.setRuntimeApiKey(provider, process.env.PI_API_KEY);
     }
+    if (dummyApiKeyEnv) {
+      authStorage.setRuntimeApiKey(provider, dummyApiKeyEnv.value);
+    }
 
-    if (mode === 'builtin-provider') {
+    if (mode === 'onecli-builtin-provider') {
+      log(
+        `Using OneCLI-backed Pi provider ${provider} with model ${model} (dummy credential via ${dummyApiKeyEnv?.envName})`,
+      );
+    } else if (mode === 'builtin-provider') {
       log(`Using built-in Pi provider ${provider} with model ${model}`);
     } else {
       log(
