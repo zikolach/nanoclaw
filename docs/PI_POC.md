@@ -11,12 +11,13 @@ Implemented:
 - env-driven Pi model/provider bootstrap for OpenAI-compatible endpoints
 - durable Pi session resume across container restarts using Pi session files
 - long-lived Pi container loop with NanoClaw IPC input polling between prompts
+- Pi-native NanoClaw tools: `send_message`, `schedule_task`, `list_tasks`, `pause_task`, `resume_task`, `cancel_task`, `update_task`, `register_group`
+- basic transcript JSONL archive at `groups/<name>/conversations/pi-transcript.jsonl`
 
 Not implemented yet:
 
-- scheduled tasks
-- NanoClaw-specific tool parity
-- compaction/transcript parity
+- full NanoClaw-specific tool parity beyond the current task/message/group tool set
+- compaction parity
 
 ## Phase 2 / 4 validation
 
@@ -27,6 +28,9 @@ Validated directly against the Pi container runtime:
 - memory persisted across restarts in local-provider mode
 - runner now stays alive after a prompt and waits for new IPC input files
 - queued IPC messages are processed as subsequent prompts in the same live container session
+- scheduled task mode now works, including pre-agent task scripts with `{ "wakeAgent": boolean, "data"?: any }` output
+- custom Pi tools can now write NanoClaw IPC files for outbound messages, task management, and group registration
+- each completed Pi prompt now appends user/assistant entries to `pi-transcript.jsonl`
 
 ## Runtime modes
 

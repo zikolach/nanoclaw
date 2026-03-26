@@ -247,16 +247,41 @@ Cons:
 
 The Pi path is not complete until all of these work:
 
-1. first-turn prompt execution
-2. follow-up turns delivered over IPC
-3. host idle timeout and close sentinel behavior
-4. scheduled task execution
-5. scheduled task `script` pre-processing
-6. per-group session continuity across container restarts
-7. outbound message/tool actions
-8. group/project/global context isolation
-9. compaction behavior or a documented replacement
-10. container build + startup reliability
+- [x] first-turn prompt execution
+- [x] follow-up turns delivered over IPC
+- [x] host idle timeout and close sentinel behavior
+- [x] scheduled task execution
+- [x] scheduled task `script` pre-processing
+- [x] per-group session continuity across container restarts
+- [x] outbound message/tool actions
+- [ ] full group/project/global context isolation review
+- [~] transcript parity (basic JSONL transcript archive implemented, Claude-style archive/compaction parity still missing)
+- [ ] compaction parity or documented replacement
+- [x] Pi container build + startup reliability for the PoC
+
+## Migration progress snapshot
+
+Implemented on `feat/pi-runtime-poc`:
+
+- [x] separate experimental Pi container image and build script
+- [x] runtime switch with `AGENT_RUNTIME=pi`
+- [x] local/custom provider mode via `PI_BASE_URL`
+- [x] built-in `openai-codex` provider mode via mounted Pi auth
+- [x] persistent Pi sessions stored per group
+- [x] long-lived container loop waiting on NanoClaw IPC input
+- [x] scheduled task prompt execution
+- [x] scheduled task pre-script execution with `wakeAgent`
+- [x] Pi-native NanoClaw tools for messaging and task management
+- [x] basic transcript JSONL append in `groups/<name>/conversations/pi-transcript.jsonl`
+
+Still pending:
+
+- [ ] confirm end-to-end host integration in normal NanoClaw message loop
+- [ ] verify all task mutation paths end to end (`update_task`, `pause_task`, `resume_task`, `cancel_task`)
+- [ ] review context/resource loading strategy against Pi `DefaultResourceLoader`
+- [ ] decide final auth architecture vs OneCLI
+- [ ] replace or document missing Claude-specific compaction/archive behavior
+- [ ] add tests around the Pi runtime path
 
 ## Implementation phases
 

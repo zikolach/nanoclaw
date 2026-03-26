@@ -1,12 +1,16 @@
+import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { Type } from '@sinclair/typebox';
+import { CronExpressionParser } from 'cron-parser';
 import {
   AuthStorage,
   createAgentSession,
   ModelRegistry,
   SessionManager,
   SettingsManager,
+  type ToolDefinition,
 } from '@mariozechner/pi-coding-agent';
 
 interface ContainerInput {
@@ -31,11 +35,23 @@ const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 const DEFAULT_PROVIDER = 'nanoclaw';
 const DEFAULT_THINKING_LEVEL = 'medium' as const;
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+const IPC_DIR = '/workspace/ipc';
+const IPC_INPUT_DIR = path.join(IPC_DIR, 'input');
+const IPC_MESSAGES_DIR = path.join(IPC_DIR, 'messages');
+const IPC_TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const IPC_CURRENT_TASKS_FILE = path.join(IPC_DIR, 'current_tasks.json');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
+interface ScriptResult {
+  wakeAgent: boolean;
+  data?: unknown;
+}
+
+const SCRIPT_TIMEOUT_MS = 30_000;
+const TRANSCRIPTS_DIR = '/workspace/group/conversations';
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
@@ -147,6 +163,422 @@ function waitForIpcMessage(): Promise<string | null> {
       setTimeout(poll, IPC_POLL_MS);
     };
     poll();
+  });
+}
+
+function writeIpcFile(dir: string, data: object): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filePath = path.join(dir, filename);
+  const tempPath = `${filePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+  fs.renameSync(tempPath, filePath);
+  return filename;
+}
+
+function appendTranscriptEntry(entry: Record<string, unknown>): void {
+  try {
+    fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
+    const filePath = path.join(TRANSCRIPTS_DIR, 'pi-transcript.jsonl');
+    fs.appendFileSync(filePath, `${JSON.stringify(entry)}\n`);
+  } catch (error) {
+    log(
+      `Failed to append transcript entry: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
+  const sendMessageTool: ToolDefinition = {
+    name: 'send_message',
+    label: 'Send Message',
+    description:
+      'Send a message to the user or group immediately while you are still running.',
+    parameters: Type.Object({
+      text: Type.String({ description: 'The message text to send' }),
+      sender: Type.Optional(
+        Type.String({
+          description:
+            'Optional sender or role identity to attach to the message',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      writeIpcFile(IPC_MESSAGES_DIR, {
+        type: 'message',
+        chatJid: input.chatJid,
+        text: params.text,
+        sender: params.sender || undefined,
+        groupFolder: input.groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+      return {
+        content: [{ type: 'text', text: 'Message sent.' }],
+        details: {},
+      };
+    },
+  };
+
+  const scheduleTaskTool: ToolDefinition = {
+    name: 'schedule_task',
+    label: 'Schedule Task',
+    description:
+      'Schedule a recurring or one-time task to run later as a NanoClaw task.',
+    parameters: Type.Object({
+      prompt: Type.String({
+        description: 'Instructions for the scheduled task',
+      }),
+      schedule_type: Type.Union([
+        Type.Literal('cron'),
+        Type.Literal('interval'),
+        Type.Literal('once'),
+      ]),
+      schedule_value: Type.String({
+        description:
+          'cron expression, interval milliseconds, or local timestamp',
+      }),
+      context_mode: Type.Optional(
+        Type.Union([Type.Literal('group'), Type.Literal('isolated')]),
+      ),
+      target_group_jid: Type.Optional(
+        Type.String({ description: 'Target group JID (main group only)' }),
+      ),
+      script: Type.Optional(
+        Type.String({
+          description:
+            'Optional bash script. Last stdout line must be JSON with wakeAgent boolean.',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      if (params.schedule_type === 'cron') {
+        try {
+          CronExpressionParser.parse(params.schedule_value);
+        } catch {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Invalid cron: "${params.schedule_value}".`,
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+      } else if (params.schedule_type === 'interval') {
+        const ms = parseInt(params.schedule_value, 10);
+        if (isNaN(ms) || ms <= 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Invalid interval: "${params.schedule_value}".`,
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+      } else {
+        const date = new Date(params.schedule_value);
+        if (isNaN(date.getTime())) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Invalid timestamp: "${params.schedule_value}".`,
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+      }
+
+      const targetJid =
+        input.isMain && params.target_group_jid
+          ? params.target_group_jid
+          : input.chatJid;
+      const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      writeIpcFile(IPC_TASKS_DIR, {
+        type: 'schedule_task',
+        taskId,
+        prompt: params.prompt,
+        script: params.script || undefined,
+        schedule_type: params.schedule_type,
+        schedule_value: params.schedule_value,
+        context_mode: params.context_mode || 'group',
+        targetJid,
+        createdBy: input.groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Task ${taskId} scheduled: ${params.schedule_type} - ${params.schedule_value}`,
+          },
+        ],
+        details: {},
+      };
+    },
+  };
+
+  const listTasksTool: ToolDefinition = {
+    name: 'list_tasks',
+    label: 'List Tasks',
+    description: 'List all scheduled tasks visible to this group.',
+    parameters: Type.Object({}),
+    execute: async () => {
+      try {
+        if (!fs.existsSync(IPC_CURRENT_TASKS_FILE)) {
+          return {
+            content: [{ type: 'text', text: 'No scheduled tasks found.' }],
+            details: {},
+          };
+        }
+        const tasks = JSON.parse(
+          fs.readFileSync(IPC_CURRENT_TASKS_FILE, 'utf8'),
+        ) as Array<Record<string, unknown>>;
+        if (tasks.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No scheduled tasks found.' }],
+            details: {},
+          };
+        }
+        const formatted = tasks
+          .map(
+            (t) =>
+              `- [${String(t.id)}] ${String(t.prompt).slice(0, 50)}... (${String(t.schedule_type)}: ${String(t.schedule_value)}) - ${String(t.status)}, next: ${String(t.next_run || 'N/A')}`,
+          )
+          .join('\n');
+        return {
+          content: [{ type: 'text', text: `Scheduled tasks:\n${formatted}` }],
+          details: {},
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error reading tasks: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+          details: {},
+        };
+      }
+    },
+  };
+
+  const taskMutationTool = (
+    name: 'pause_task' | 'resume_task' | 'cancel_task',
+    description: string,
+  ): ToolDefinition => ({
+    name,
+    label: name.replace('_', ' '),
+    description,
+    parameters: Type.Object({
+      task_id: Type.String({ description: 'The task ID' }),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      writeIpcFile(IPC_TASKS_DIR, {
+        type: name,
+        taskId: params.task_id,
+        groupFolder: input.groupFolder,
+        isMain: input.isMain,
+        timestamp: new Date().toISOString(),
+      });
+      return {
+        content: [
+          { type: 'text', text: `Task ${params.task_id} ${name} requested.` },
+        ],
+        details: {},
+      };
+    },
+  });
+
+  const updateTaskTool: ToolDefinition = {
+    name: 'update_task',
+    label: 'Update Task',
+    description:
+      'Update an existing scheduled task. Only provided fields are changed.',
+    parameters: Type.Object({
+      task_id: Type.String({ description: 'The task ID to update' }),
+      prompt: Type.Optional(Type.String({ description: 'New prompt' })),
+      schedule_type: Type.Optional(
+        Type.Union([
+          Type.Literal('cron'),
+          Type.Literal('interval'),
+          Type.Literal('once'),
+        ]),
+      ),
+      schedule_value: Type.Optional(
+        Type.String({ description: 'New schedule value' }),
+      ),
+      script: Type.Optional(
+        Type.String({ description: 'New script, or empty string to clear it' }),
+      ),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      if (
+        params.schedule_type === 'cron' ||
+        (!params.schedule_type && params.schedule_value)
+      ) {
+        if (params.schedule_value) {
+          try {
+            CronExpressionParser.parse(params.schedule_value);
+          } catch {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Invalid cron: "${params.schedule_value}".`,
+                },
+              ],
+              isError: true,
+              details: {},
+            };
+          }
+        }
+      }
+      if (params.schedule_type === 'interval' && params.schedule_value) {
+        const ms = parseInt(params.schedule_value, 10);
+        if (isNaN(ms) || ms <= 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Invalid interval: "${params.schedule_value}".`,
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+      }
+
+      const data: Record<string, string | boolean | undefined> = {
+        type: 'update_task',
+        taskId: params.task_id,
+        groupFolder: input.groupFolder,
+        isMain: input.isMain,
+        timestamp: new Date().toISOString(),
+      };
+      if (params.prompt !== undefined) data.prompt = params.prompt;
+      if (params.script !== undefined) data.script = params.script;
+      if (params.schedule_type !== undefined)
+        data.schedule_type = params.schedule_type;
+      if (params.schedule_value !== undefined)
+        data.schedule_value = params.schedule_value;
+
+      writeIpcFile(IPC_TASKS_DIR, data);
+      return {
+        content: [
+          { type: 'text', text: `Task ${params.task_id} update requested.` },
+        ],
+        details: {},
+      };
+    },
+  };
+
+  const registerGroupTool: ToolDefinition = {
+    name: 'register_group',
+    label: 'Register Group',
+    description:
+      'Register a new chat/group so the agent can respond there. Main group only.',
+    parameters: Type.Object({
+      jid: Type.String({ description: 'The target chat JID' }),
+      name: Type.String({ description: 'Display name for the group' }),
+      folder: Type.String({ description: 'Channel-prefixed folder name' }),
+      trigger: Type.String({ description: 'Trigger word like @Andy' }),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      if (!input.isMain) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Only the main group can register new groups.',
+            },
+          ],
+          isError: true,
+          details: {},
+        };
+      }
+      writeIpcFile(IPC_TASKS_DIR, {
+        type: 'register_group',
+        jid: params.jid,
+        name: params.name,
+        folder: params.folder,
+        trigger: params.trigger,
+        timestamp: new Date().toISOString(),
+      });
+      return {
+        content: [{ type: 'text', text: `Group "${params.name}" registered.` }],
+        details: {},
+      };
+    },
+  };
+
+  return [
+    sendMessageTool,
+    scheduleTaskTool,
+    listTasksTool,
+    taskMutationTool('pause_task', 'Pause a scheduled task.'),
+    taskMutationTool('resume_task', 'Resume a paused task.'),
+    taskMutationTool('cancel_task', 'Cancel a scheduled task.'),
+    updateTaskTool,
+    registerGroupTool,
+  ];
+}
+
+async function runScript(script: string): Promise<ScriptResult | null> {
+  const scriptPath = '/tmp/task-script.sh';
+  fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+
+  return new Promise((resolve) => {
+    execFile(
+      'bash',
+      [scriptPath],
+      {
+        timeout: SCRIPT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+        env: process.env,
+      },
+      (error, stdout, stderr) => {
+        if (stderr) {
+          log(`Script stderr: ${stderr.slice(0, 500)}`);
+        }
+
+        if (error) {
+          log(`Script error: ${error.message}`);
+          return resolve(null);
+        }
+
+        const lines = stdout.trim().split('\n');
+        const lastLine = lines[lines.length - 1];
+        if (!lastLine) {
+          log('Script produced no output');
+          return resolve(null);
+        }
+
+        try {
+          const result = JSON.parse(lastLine) as ScriptResult;
+          if (typeof result.wakeAgent !== 'boolean') {
+            log(
+              `Script output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`,
+            );
+            return resolve(null);
+          }
+          resolve(result);
+        } catch {
+          log(`Script output is not valid JSON: ${lastLine.slice(0, 200)}`);
+          resolve(null);
+        }
+      },
+    );
   });
 }
 
@@ -285,10 +717,7 @@ async function main(): Promise<void> {
     } = writePiConfig();
 
     if (input.isScheduledTask) {
-      log('Scheduled tasks are not yet supported by the Pi runtime');
-    }
-    if (input.script) {
-      log('Task scripts are not yet supported by the Pi runtime');
+      log('Running in scheduled task mode');
     }
 
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -336,6 +765,7 @@ async function main(): Promise<void> {
       modelRegistry,
       settingsManager,
       sessionManager,
+      customTools: createNanoclawTools(input),
     });
 
     let currentText = '';
@@ -353,6 +783,27 @@ async function main(): Promise<void> {
       prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
     }
 
+    if (input.script && input.isScheduledTask) {
+      log('Running task script...');
+      const scriptResult = await runScript(input.script);
+
+      if (!scriptResult || !scriptResult.wakeAgent) {
+        const reason = scriptResult
+          ? 'wakeAgent=false'
+          : 'script error/no output';
+        log(`Script decided not to wake agent: ${reason}`);
+        writeOutput({
+          status: 'success',
+          result: null,
+          newSessionId: session.sessionFile || session.sessionId,
+        });
+        return;
+      }
+
+      log('Script wakeAgent=true, enriching prompt with data');
+      prompt = `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.data, null, 2)}\n\nInstructions:\n${input.prompt}`;
+    }
+
     const pending = drainIpcInput();
     if (pending.length > 0) {
       log(
@@ -367,6 +818,20 @@ async function main(): Promise<void> {
         `Starting Pi prompt (session: ${session.sessionFile || session.sessionId})`,
       );
       await session.prompt(prompt);
+
+      appendTranscriptEntry({
+        timestamp: new Date().toISOString(),
+        sessionId: session.sessionFile || session.sessionId,
+        role: 'user',
+        content: prompt,
+        isScheduledTask: Boolean(input.isScheduledTask),
+      });
+      appendTranscriptEntry({
+        timestamp: new Date().toISOString(),
+        sessionId: session.sessionFile || session.sessionId,
+        role: 'assistant',
+        content: currentText || null,
+      });
 
       writeOutput({
         status: 'success',
