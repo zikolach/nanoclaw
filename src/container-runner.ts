@@ -167,11 +167,6 @@ function buildVolumeMounts(
   if (AGENT_RUNTIME === 'pi') {
     const groupPiAgentDir = path.join(groupDataDir, '.pi-agent');
     fs.mkdirSync(groupPiAgentDir, { recursive: true });
-    mounts.push({
-      hostPath: groupPiAgentDir,
-      containerPath: '/home/node/.pi/agent',
-      readonly: false,
-    });
 
     const hostPiAuth = path.join(
       process.env.HOME || '',
@@ -180,12 +175,20 @@ function buildVolumeMounts(
       'auth.json',
     );
     if (process.env.HOME && fs.existsSync(hostPiAuth)) {
-      mounts.push({
-        hostPath: hostPiAuth,
-        containerPath: '/home/node/.pi/agent/auth.json',
-        readonly: true,
-      });
+      const groupPiAuth = path.join(groupPiAgentDir, 'auth.json');
+      const shouldCopyAuth =
+        !fs.existsSync(groupPiAuth) ||
+        fs.statSync(hostPiAuth).mtimeMs > fs.statSync(groupPiAuth).mtimeMs;
+      if (shouldCopyAuth) {
+        fs.copyFileSync(hostPiAuth, groupPiAuth);
+      }
     }
+
+    mounts.push({
+      hostPath: groupPiAgentDir,
+      containerPath: '/home/node/.pi/agent',
+      readonly: false,
+    });
   }
 
   // Per-group IPC namespace: each group gets its own IPC directory

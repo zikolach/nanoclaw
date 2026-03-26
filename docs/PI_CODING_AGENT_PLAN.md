@@ -282,7 +282,7 @@ Still pending:
 - [ ] review context/resource loading strategy against Pi `DefaultResourceLoader`
 - [ ] decide final auth architecture vs OneCLI
 - [ ] replace or document missing Claude-specific compaction/archive behavior
-- [ ] add tests around the Pi runtime path
+- [~] add tests around the Pi runtime path (host/runtime smoke test script added; more automated coverage still needed)
 
 ## Implementation phases
 

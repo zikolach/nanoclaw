@@ -78,6 +78,16 @@ PI_REASONING=false
 ./container/build-pi.sh
 ```
 
+## End-to-end host/runtime smoke test
+
+This exercises the real NanoClaw host-side `runContainerAgent()` path against the Pi container runtime:
+
+```bash
+npx tsx scripts/test-pi-host-e2e.ts
+```
+
+Default behavior uses the local `llamabarn` path. Override `PI_PROVIDER`, `PI_MODEL`, and related env vars if needed.
+
 ## Notes
 
 - In local/custom mode, `PI_BASE_URL` should point to the API root ending in `/v1`.
