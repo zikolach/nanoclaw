@@ -255,8 +255,8 @@ The Pi path is not complete until all of these work:
 - [x] per-group session continuity across container restarts
 - [x] outbound message/tool actions
 - [ ] full group/project/global context isolation review
-- [~] transcript parity (basic JSONL transcript archive implemented, Claude-style archive/compaction parity still missing)
-- [ ] compaction parity or documented replacement
+- [~] transcript parity (basic JSONL transcript archive implemented, Claude-style archive format still missing)
+- [~] compaction parity (manual `/compact` forwarding implemented, broader parity/documentation still pending)
 - [x] Pi container build + startup reliability for the PoC
 
 ## Migration progress snapshot
@@ -273,6 +273,7 @@ Implemented on `feat/pi-runtime-poc`:
 - [x] scheduled task pre-script execution with `wakeAgent`
 - [x] Pi-native NanoClaw tools for messaging and task management
 - [x] basic transcript JSONL append in `groups/<name>/conversations/pi-transcript.jsonl`
+- [x] manual `/compact` forwarding to Pi session compaction
 
 Still pending:
 

@@ -188,6 +188,21 @@ function appendTranscriptEntry(entry: Record<string, unknown>): void {
   }
 }
 
+function parseCompactCommand(prompt: string): {
+  isCompact: boolean;
+  instructions?: string;
+} {
+  const trimmed = prompt.trim();
+  if (!trimmed.startsWith('/compact')) {
+    return { isCompact: false };
+  }
+  const instructions = trimmed.slice('/compact'.length).trim();
+  return {
+    isCompact: true,
+    instructions: instructions || undefined,
+  };
+}
+
 function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
   const sendMessageTool: ToolDefinition = {
     name: 'send_message',
@@ -817,7 +832,17 @@ async function main(): Promise<void> {
       log(
         `Starting Pi prompt (session: ${session.sessionFile || session.sessionId})`,
       );
-      await session.prompt(prompt);
+
+      const compactCommand = parseCompactCommand(prompt);
+      let resultText: string | null = null;
+      if (compactCommand.isCompact) {
+        const compaction = await session.compact(compactCommand.instructions);
+        resultText = `Context compacted. Summary:\n\n${compaction.summary}`;
+        currentText = resultText;
+      } else {
+        await session.prompt(prompt);
+        resultText = currentText || null;
+      }
 
       appendTranscriptEntry({
         timestamp: new Date().toISOString(),
@@ -830,12 +855,12 @@ async function main(): Promise<void> {
         timestamp: new Date().toISOString(),
         sessionId: session.sessionFile || session.sessionId,
         role: 'assistant',
-        content: currentText || null,
+        content: resultText,
       });
 
       writeOutput({
         status: 'success',
-        result: currentText || null,
+        result: resultText,
         newSessionId: session.sessionFile || session.sessionId,
       });
 

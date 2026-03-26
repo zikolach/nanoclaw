@@ -17,7 +17,7 @@ Implemented:
 Not implemented yet:
 
 - full NanoClaw-specific tool parity beyond the current task/message/group tool set
-- compaction parity
+- Claude-style transcript/archive parity beyond the basic JSONL log
 
 ## Phase 2 / 4 validation
 
@@ -31,6 +31,7 @@ Validated directly against the Pi container runtime:
 - scheduled task mode now works, including pre-agent task scripts with `{ "wakeAgent": boolean, "data"?: any }` output
 - custom Pi tools can now write NanoClaw IPC files for outbound messages, task management, and group registration
 - each completed Pi prompt now appends user/assistant entries to `pi-transcript.jsonl`
+- manual `/compact` prompts are intercepted and forwarded to Pi session compaction
 
 ## Runtime modes
 
