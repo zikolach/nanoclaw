@@ -94,6 +94,12 @@ The smoke test now performs orphan cleanup before and after the run. For manual 
 ./scripts/cleanup-pi-test-containers.sh
 ```
 
+Example static Pi config files for a local `llamabarn` setup are stored under:
+
+```text
+docs/examples/pi/
+```
+
 ## Notes
 
 - In local/custom mode, `PI_BASE_URL` should point to the API root ending in `/v1`.
