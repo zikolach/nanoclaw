@@ -88,6 +88,12 @@ npx tsx scripts/test-pi-host-e2e.ts
 
 Default behavior uses the local `llamabarn` path. Override `PI_PROVIDER`, `PI_MODEL`, and related env vars if needed.
 
+The smoke test now performs orphan cleanup before and after the run. For manual cleanup of any leftover Pi test containers:
+
+```bash
+./scripts/cleanup-pi-test-containers.sh
+```
+
 ## Notes
 
 - In local/custom mode, `PI_BASE_URL` should point to the API root ending in `/v1`.

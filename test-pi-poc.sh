@@ -16,7 +16,7 @@ PI_API_KEY_VALUE="${PI_API_KEY:-dummy-key}"
 echo "Building Pi image..."
 ./container/build-pi.sh
 
-DOCKER_ARGS=(run -i --add-host=host.docker.internal:host-gateway -e PI_PROVIDER="$PI_PROVIDER_VALUE")
+DOCKER_ARGS=(run --rm -i --add-host=host.docker.internal:host-gateway -e PI_PROVIDER="$PI_PROVIDER_VALUE")
 
 if [ -n "${PI_BASE_URL:-}" ]; then
   : "${PI_MODEL_VALUE:?Set PI_MODEL when using PI_BASE_URL}"
@@ -27,7 +27,7 @@ else
   if [ -z "$PI_MODEL_VALUE" ]; then
     PI_MODEL_VALUE="gpt-5.2-codex"
   fi
-  DOCKER_ARGS=(run -i --add-host=host.docker.internal:host-gateway -v "$HOME/.pi/agent/auth.json:/home/node/.pi/agent/auth.json:ro" -e PI_PROVIDER="$PI_PROVIDER_VALUE" -e PI_MODEL="$PI_MODEL_VALUE")
+  DOCKER_ARGS=(run --rm -i --add-host=host.docker.internal:host-gateway -v "$HOME/.pi/agent/auth.json:/home/node/.pi/agent/auth.json:ro" -e PI_PROVIDER="$PI_PROVIDER_VALUE" -e PI_MODEL="$PI_MODEL_VALUE")
   echo "Running built-in provider smoke test..."
 fi
 

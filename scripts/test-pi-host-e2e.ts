@@ -23,11 +23,15 @@ async function main() {
 
   const [
     { runContainerAgent },
+    { cleanupOrphans },
     { resolveGroupIpcPath, resolveGroupFolderPath },
   ] = await Promise.all([
     import('../src/container-runner.js'),
+    import('../src/container-runtime.js'),
     import('../src/group-folder.js'),
   ]);
+
+  cleanupOrphans();
 
   const unique = `pi-e2e-${Date.now()}`;
   const group = {
@@ -46,6 +50,7 @@ async function main() {
   let followUpSent = false;
   let closeSent = false;
   let successEventsAfterFollowUp = 0;
+  let scheduledTaskScript: string | null = null;
 
   const writeIpcMessage = (text: string) => {
     const inputDir = path.join(ipcDir, 'input');
@@ -56,98 +61,104 @@ async function main() {
     fs.writeFileSync(file, JSON.stringify({ type: 'message', text }));
   };
 
-  const result = await runContainerAgent(
-    group,
-    {
-      prompt: 'Reply with exactly first',
-      groupFolder: group.folder,
-      chatJid: 'test@g.us',
-      isMain: false,
-    },
-    () => {},
-    async (output) => {
-      outputs.push(output.result ?? null);
-      if (
-        !followUpSent &&
-        output.status === 'success' &&
-        output.result !== null
-      ) {
-        followUpSent = true;
-        writeIpcMessage('Reply with exactly second');
-        return;
-      }
-      if (followUpSent && output.status === 'success') {
-        successEventsAfterFollowUp += 1;
-        if (!closeSent && successEventsAfterFollowUp >= 2) {
-          closeSent = true;
+  try {
+    const result = await runContainerAgent(
+      group,
+      {
+        prompt: 'Reply with exactly first',
+        groupFolder: group.folder,
+        chatJid: 'test@g.us',
+        isMain: false,
+      },
+      () => {},
+      async (output) => {
+        outputs.push(output.result ?? null);
+        if (
+          !followUpSent &&
+          output.status === 'success' &&
+          output.result !== null
+        ) {
+          followUpSent = true;
+          writeIpcMessage('Reply with exactly second');
+          return;
+        }
+        if (followUpSent && output.status === 'success') {
+          successEventsAfterFollowUp += 1;
+          if (!closeSent && successEventsAfterFollowUp >= 2) {
+            closeSent = true;
+            fs.writeFileSync(path.join(ipcDir, 'input', '_close'), '');
+          }
+        }
+      },
+    );
+
+    assert.equal(result.status, 'success');
+
+    const transcriptPath = path.join(
+      groupDir,
+      'conversations',
+      'pi-transcript.jsonl',
+    );
+    assert.equal(fs.existsSync(transcriptPath), true);
+    const transcript = fs.readFileSync(transcriptPath, 'utf8');
+    assert.match(transcript, /Reply with exactly first/);
+    assert.match(transcript, /Reply with exactly second/);
+
+    scheduledTaskScript = path.join(os.tmpdir(), `pi-task-${Date.now()}.sh`);
+    fs.writeFileSync(
+      scheduledTaskScript,
+      '#!/bin/bash\necho \'{"wakeAgent":true,"data":{"answer":"banana"}}\'\n',
+      { mode: 0o755 },
+    );
+
+    let taskCloseSent = false;
+    let taskOutput: string | null = null;
+    const taskResult = await runContainerAgent(
+      group,
+      {
+        prompt: 'Reply with the answer field only.',
+        groupFolder: group.folder,
+        chatJid: 'test@g.us',
+        isMain: false,
+        isScheduledTask: true,
+        script: fs.readFileSync(scheduledTaskScript, 'utf8'),
+      },
+      () => {},
+      async (output) => {
+        if (output.result) {
+          taskOutput = output.result;
+        }
+        if (!taskCloseSent && output.status === 'success') {
+          taskCloseSent = true;
           fs.writeFileSync(path.join(ipcDir, 'input', '_close'), '');
         }
-      }
-    },
-  );
-
-  assert.equal(result.status, 'success');
-
-  const transcriptPath = path.join(
-    groupDir,
-    'conversations',
-    'pi-transcript.jsonl',
-  );
-  assert.equal(fs.existsSync(transcriptPath), true);
-  const transcript = fs.readFileSync(transcriptPath, 'utf8');
-  assert.match(transcript, /Reply with exactly first/);
-  assert.match(transcript, /Reply with exactly second/);
-
-  const scheduledTaskScript = path.join(
-    os.tmpdir(),
-    `pi-task-${Date.now()}.sh`,
-  );
-  fs.writeFileSync(
-    scheduledTaskScript,
-    '#!/bin/bash\necho \'{"wakeAgent":true,"data":{"answer":"banana"}}\'\n',
-    { mode: 0o755 },
-  );
-
-  let taskCloseSent = false;
-  let taskOutput: string | null = null;
-  const taskResult = await runContainerAgent(
-    group,
-    {
-      prompt: 'Reply with the answer field only.',
-      groupFolder: group.folder,
-      chatJid: 'test@g.us',
-      isMain: false,
-      isScheduledTask: true,
-      script: fs.readFileSync(scheduledTaskScript, 'utf8'),
-    },
-    () => {},
-    async (output) => {
-      if (output.result) {
-        taskOutput = output.result;
-      }
-      if (!taskCloseSent && output.status === 'success') {
-        taskCloseSent = true;
-        fs.writeFileSync(path.join(ipcDir, 'input', '_close'), '');
-      }
-    },
-  );
-
-  assert.equal(taskResult.status, 'success');
-  assert.equal(taskOutput, 'banana');
-  fs.unlinkSync(scheduledTaskScript);
-
-  console.log('Pi host E2E test passed');
-  console.log(
-    JSON.stringify(
-      {
-        outputs,
-        finalSessionId: result.newSessionId,
-        scheduledTaskSessionId: taskResult.newSessionId,
       },
-      null,
-      2,
-    ),
-  );
+    );
+
+    assert.equal(taskResult.status, 'success');
+    assert.equal(taskOutput, 'banana');
+
+    console.log('Pi host E2E test passed');
+    console.log(
+      JSON.stringify(
+        {
+          outputs,
+          finalSessionId: result.newSessionId,
+          scheduledTaskSessionId: taskResult.newSessionId,
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    try {
+      fs.writeFileSync(path.join(ipcDir, 'input', '_close'), '');
+    } catch {}
+    if (scheduledTaskScript && fs.existsSync(scheduledTaskScript)) {
+      fs.unlinkSync(scheduledTaskScript);
+    }
+    cleanupOrphans();
+  }
 }
 
 main().catch((error) => {
