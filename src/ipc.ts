@@ -131,12 +131,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 { file, sourceGroup, err },
                 'Error processing IPC message',
               );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
+              if (fs.existsSync(filePath)) {
+                const errorDir = path.join(ipcBaseDir, 'errors');
+                fs.mkdirSync(errorDir, { recursive: true });
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
+              }
             }
           }
         }
