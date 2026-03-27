@@ -99,6 +99,13 @@ export interface Channel {
   name: string;
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
+  sendImage?(
+    jid: string,
+    image: Buffer,
+    mimeType: string,
+    caption?: string,
+    threadId?: string,
+  ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;

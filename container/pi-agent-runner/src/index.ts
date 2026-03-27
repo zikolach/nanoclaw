@@ -12,6 +12,11 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from '@mariozechner/pi-coding-agent';
+import type {
+  ImageContent,
+  TextContent,
+  ToolResultMessage,
+} from '@mariozechner/pi-ai';
 
 interface ContainerInput {
   prompt: string;
@@ -187,6 +192,22 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+function writeIpcMediaMessage(
+  chatJid: string,
+  image: ImageContent,
+  caption?: string,
+): void {
+  writeIpcFile(IPC_MESSAGES_DIR, {
+    type: 'media_message',
+    mediaKind: 'image',
+    chatJid,
+    data: image.data,
+    mimeType: image.mimeType,
+    caption,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 function appendTranscriptEntry(entry: Record<string, unknown>): void {
   try {
     fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
@@ -212,6 +233,31 @@ function parseCompactCommand(prompt: string): {
     isCompact: true,
     instructions: instructions || undefined,
   };
+}
+
+function extractCaption(
+  content: Array<TextContent | ImageContent>,
+): string | undefined {
+  return content
+    .filter((block): block is TextContent => block.type === 'text')
+    .map((block) => block.text.trim())
+    .find(Boolean);
+}
+
+function queueOutboundImages(
+  toolResults: ToolResultMessage[],
+  chatJid: string,
+): void {
+  for (const toolResult of toolResults) {
+    const images = toolResult.content.filter(
+      (block): block is ImageContent => block.type === 'image',
+    );
+    if (images.length === 0) continue;
+    const caption = extractCaption(toolResult.content);
+    for (const image of images) {
+      writeIpcMediaMessage(chatJid, image, caption);
+    }
+  }
 }
 
 function getOneCliDummyApiKeyEnv(
@@ -891,6 +937,9 @@ async function main(): Promise<void> {
         event.assistantMessageEvent.type === 'text_delta'
       ) {
         currentText += event.assistantMessageEvent.delta;
+      }
+      if (event.type === 'turn_end') {
+        queueOutboundImages(event.toolResults, input.chatJid);
       }
     });
 

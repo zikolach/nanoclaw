@@ -31,6 +31,9 @@ type Handler = (...args: any[]) => any;
 const botRef = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock('grammy', () => ({
+  InputFile: class MockInputFile {
+    constructor(public data: Buffer) {}
+  },
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -39,6 +42,7 @@ vi.mock('grammy', () => ({
 
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendPhoto: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       getFile: vi.fn().mockResolvedValue({ file_path: 'photos/test.jpg' }),
     };
@@ -725,6 +729,25 @@ describe('TelegramChannel', () => {
       await triggerMediaMessage('message:photo', ctx);
 
       expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- sendImage ---
+
+  describe('sendImage', () => {
+    it('sends image via bot API', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendImage?.(
+        'tg:100200300',
+        Buffer.from('img'),
+        'image/png',
+        'caption',
+      );
+
+      expect(currentBot().api.sendPhoto).toHaveBeenCalledTimes(1);
     });
   });
 
