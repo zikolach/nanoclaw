@@ -64,6 +64,13 @@ interface ScriptResult {
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const TRANSCRIPTS_DIR = '/workspace/group/conversations';
+const MAX_FETCHED_IMAGE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_FETCHED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
@@ -244,6 +251,32 @@ function extractCaption(
     .find(Boolean);
 }
 
+function normalizeFetchedImageMimeType(
+  contentType: string | null,
+  url: string,
+): string | undefined {
+  const mimeType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mimeType && ALLOWED_FETCHED_IMAGE_MIME_TYPES.has(mimeType)) {
+    return mimeType;
+  }
+
+  const pathname = new URL(url).pathname.toLowerCase();
+  if (pathname.endsWith('.jpg') || pathname.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+  if (pathname.endsWith('.png')) {
+    return 'image/png';
+  }
+  if (pathname.endsWith('.webp')) {
+    return 'image/webp';
+  }
+  if (pathname.endsWith('.gif')) {
+    return 'image/gif';
+  }
+
+  return undefined;
+}
+
 function queueOutboundImages(
   toolResults: ToolResultMessage[],
   chatJid: string,
@@ -320,7 +353,7 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
     name: 'send_image',
     label: 'Send Image',
     description:
-      'Send an image to the current user or group. Provide base64 image data and mime type.',
+      'Send an image to the current user or group when you already have base64 image data. If you only have a normal image URL, use fetch_image_from_url instead.',
     parameters: Type.Object({
       data: Type.String({ description: 'Base64-encoded image data' }),
       mimeType: Type.String({
@@ -353,6 +386,143 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
         content: [{ type: 'text', text: 'Image sent.' }],
         details: {},
       };
+    },
+  };
+
+  const fetchImageFromUrlTool: ToolDefinition = {
+    name: 'fetch_image_from_url',
+    label: 'Fetch Image From URL',
+    description:
+      'Download an image from a direct image URL and return it as image content so NanoClaw can send it back to the current chat. Use this when the user asks you to send an image from the web and you have a direct image file URL.',
+    parameters: Type.Object({
+      url: Type.String({
+        description:
+          'Direct image URL to fetch, such as https://example.com/photo.jpg',
+      }),
+      caption: Type.Optional(
+        Type.String({
+          description:
+            'Optional caption to send with the image. Keep it short because it may be used as the Telegram photo caption.',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(params.url);
+      } catch {
+        return {
+          content: [{ type: 'text', text: 'Invalid image URL.' }],
+          isError: true,
+          details: {},
+        };
+      }
+
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Only http and https image URLs are supported.',
+            },
+          ],
+          isError: true,
+          details: {},
+        };
+      }
+
+      try {
+        const response = await fetch(parsedUrl, {
+          redirect: 'follow',
+          headers: {
+            'user-agent': 'NanoClaw-Pi-Agent/1.0',
+            accept: 'image/*',
+          },
+        });
+
+        if (!response.ok) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Image fetch failed with HTTP ${response.status}.`,
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+
+        const mimeType = normalizeFetchedImageMimeType(
+          response.headers.get('content-type'),
+          response.url || parsedUrl.toString(),
+        );
+        if (!mimeType) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Fetched URL did not return a supported image type.',
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.byteLength === 0) {
+          return {
+            content: [{ type: 'text', text: 'Fetched image is empty.' }],
+            isError: true,
+            details: {},
+          };
+        }
+        if (bytes.byteLength > MAX_FETCHED_IMAGE_BYTES) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Fetched image is too large (${bytes.byteLength} bytes).`,
+              },
+            ],
+            isError: true,
+            details: {},
+          };
+        }
+
+        const caption =
+          typeof params.caption === 'string' && params.caption.trim()
+            ? params.caption.trim()
+            : `Image from ${new URL(response.url || parsedUrl.toString()).hostname}`;
+
+        return {
+          content: [
+            { type: 'text', text: caption },
+            {
+              type: 'image',
+              data: bytes.toString('base64'),
+              mimeType,
+            },
+          ],
+          details: {
+            url: response.url || parsedUrl.toString(),
+            mimeType,
+            size: bytes.byteLength,
+          },
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Image fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+          details: {},
+        };
+      }
     },
   };
 
@@ -662,6 +832,7 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
   return [
     sendMessageTool,
     sendImageTool,
+    fetchImageFromUrlTool,
     scheduleTaskTool,
     listTasksTool,
     taskMutationTool('pause_task', 'Pause a scheduled task.'),
