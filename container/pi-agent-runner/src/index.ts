@@ -316,6 +316,46 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
     },
   };
 
+  const sendImageTool: ToolDefinition = {
+    name: 'send_image',
+    label: 'Send Image',
+    description:
+      'Send an image to the current user or group. Provide base64 image data and mime type.',
+    parameters: Type.Object({
+      data: Type.String({ description: 'Base64-encoded image data' }),
+      mimeType: Type.String({
+        description: 'Image MIME type such as image/png or image/jpeg',
+      }),
+      caption: Type.Optional(
+        Type.String({ description: 'Optional caption to send with the image' }),
+      ),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      try {
+        Buffer.from(params.data, 'base64');
+      } catch {
+        return {
+          content: [{ type: 'text', text: 'Invalid base64 image data.' }],
+          isError: true,
+          details: {},
+        };
+      }
+      writeIpcMediaMessage(
+        input.chatJid,
+        {
+          type: 'image',
+          data: params.data,
+          mimeType: params.mimeType,
+        },
+        params.caption,
+      );
+      return {
+        content: [{ type: 'text', text: 'Image sent.' }],
+        details: {},
+      };
+    },
+  };
+
   const scheduleTaskTool: ToolDefinition = {
     name: 'schedule_task',
     label: 'Schedule Task',
@@ -621,6 +661,7 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
 
   return [
     sendMessageTool,
+    sendImageTool,
     scheduleTaskTool,
     listTasksTool,
     taskMutationTool('pause_task', 'Pause a scheduled task.'),
@@ -940,6 +981,24 @@ async function main(): Promise<void> {
       }
       if (event.type === 'turn_end') {
         queueOutboundImages(event.toolResults, input.chatJid);
+      }
+      if (
+        event.type === 'tool_execution_end' &&
+        event.result &&
+        Array.isArray((event.result as { content?: unknown }).content)
+      ) {
+        const result = event.result as {
+          content: Array<TextContent | ImageContent>;
+        };
+        const images = result.content.filter(
+          (block): block is ImageContent => block.type === 'image',
+        );
+        if (images.length > 0) {
+          const caption = extractCaption(result.content);
+          for (const image of images) {
+            writeIpcMediaMessage(input.chatJid, image, caption);
+          }
+        }
       }
     });
 
