@@ -15,6 +15,11 @@ import {
 
 interface ContainerInput {
   prompt: string;
+  images?: Array<{
+    type: 'image';
+    data: string;
+    mimeType: string;
+  }>;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
@@ -936,7 +941,10 @@ async function main(): Promise<void> {
         resultText = `Context compacted. Summary:\n\n${compaction.summary}`;
         currentText = resultText;
       } else {
-        await session.prompt(prompt);
+        await session.prompt(
+          prompt,
+          input.images ? { images: input.images } : undefined,
+        );
         resultText = currentText || null;
       }
 

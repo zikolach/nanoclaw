@@ -40,6 +40,7 @@ vi.mock('grammy', () => ({
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      getFile: vi.fn().mockResolvedValue({ file_path: 'photos/test.jpg' }),
     };
 
     constructor(token: string) {
@@ -559,12 +560,23 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      const ctx = createMediaCtx({});
+      const ctx = createMediaCtx({
+        extra: { photo: [{ file_id: 'small' }, { file_id: 'large' }] },
+      });
       await triggerMediaMessage('message:photo', ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Photo]' }),
+        expect.objectContaining({
+          content: '[Photo]',
+          attachments: [
+            expect.objectContaining({
+              kind: 'image',
+              mimeType: 'image/jpeg',
+              fileId: 'large',
+            }),
+          ],
+        }),
       );
     });
 
@@ -573,12 +585,18 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      const ctx = createMediaCtx({ caption: 'Look at this' });
+      const ctx = createMediaCtx({
+        caption: 'Look at this',
+        extra: { photo: [{ file_id: 'small' }, { file_id: 'large' }] },
+      });
       await triggerMediaMessage('message:photo', ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Photo] Look at this' }),
+        expect.objectContaining({
+          content: '[Photo] Look at this',
+          attachments: [expect.objectContaining({ caption: 'Look at this' })],
+        }),
       );
     });
 
