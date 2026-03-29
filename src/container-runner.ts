@@ -40,6 +40,11 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 export interface ContainerInput {
   prompt: string;
+  images?: Array<{
+    type: 'image';
+    data: string;
+    mimeType: string;
+  }>;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;

@@ -42,6 +42,14 @@ export interface RegisteredGroup {
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }
 
+export interface MessageAttachment {
+  kind: 'image';
+  mimeType: string;
+  fileId?: string;
+  fileName?: string;
+  caption?: string;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -52,6 +60,7 @@ export interface NewMessage {
   is_from_me?: boolean;
   is_bot_message?: boolean;
   thread_id?: string;
+  attachments?: MessageAttachment[];
 }
 
 export interface ScheduledTask {
@@ -81,13 +90,29 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
+export interface DownloadedAttachment {
+  bytes: Buffer;
+  mimeType: string;
+}
+
 export interface Channel {
   name: string;
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
+  sendImage?(
+    jid: string,
+    image: Buffer,
+    mimeType: string,
+    caption?: string,
+    threadId?: string,
+  ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
+  downloadAttachment?(
+    message: NewMessage,
+    attachment: MessageAttachment,
+  ): Promise<DownloadedAttachment>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.

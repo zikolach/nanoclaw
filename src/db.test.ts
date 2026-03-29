@@ -28,6 +28,12 @@ function store(overrides: {
   content: string;
   timestamp: string;
   is_from_me?: boolean;
+  attachments?: {
+    kind: 'image';
+    mimeType: string;
+    fileId?: string;
+    caption?: string;
+  }[];
 }) {
   storeMessage({
     id: overrides.id,
@@ -37,6 +43,7 @@ function store(overrides: {
     content: overrides.content,
     timestamp: overrides.timestamp,
     is_from_me: overrides.is_from_me ?? false,
+    attachments: overrides.attachments,
   });
 }
 
@@ -107,6 +114,41 @@ describe('storeMessage', () => {
       'Andy',
     );
     expect(messages).toHaveLength(1);
+  });
+
+  it('persists attachments metadata', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-img',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: '[Photo] Look',
+      timestamp: '2024-01-01T00:00:06.000Z',
+      attachments: [
+        {
+          kind: 'image',
+          mimeType: 'image/jpeg',
+          fileId: 'abc123',
+          caption: 'Look',
+        },
+      ],
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(messages[0].attachments).toEqual([
+      {
+        kind: 'image',
+        mimeType: 'image/jpeg',
+        fileId: 'abc123',
+        caption: 'Look',
+      },
+    ]);
   });
 
   it('upserts on duplicate id+chat_jid', () => {

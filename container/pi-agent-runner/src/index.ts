@@ -12,9 +12,19 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from '@mariozechner/pi-coding-agent';
+import type {
+  ImageContent,
+  TextContent,
+  ToolResultMessage,
+} from '@mariozechner/pi-ai';
 
 interface ContainerInput {
   prompt: string;
+  images?: Array<{
+    type: 'image';
+    data: string;
+    mimeType: string;
+  }>;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
@@ -182,6 +192,22 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+function writeIpcMediaMessage(
+  chatJid: string,
+  image: ImageContent,
+  caption?: string,
+): void {
+  writeIpcFile(IPC_MESSAGES_DIR, {
+    type: 'media_message',
+    mediaKind: 'image',
+    chatJid,
+    data: image.data,
+    mimeType: image.mimeType,
+    caption,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 function appendTranscriptEntry(entry: Record<string, unknown>): void {
   try {
     fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
@@ -207,6 +233,31 @@ function parseCompactCommand(prompt: string): {
     isCompact: true,
     instructions: instructions || undefined,
   };
+}
+
+function extractCaption(
+  content: Array<TextContent | ImageContent>,
+): string | undefined {
+  return content
+    .filter((block): block is TextContent => block.type === 'text')
+    .map((block) => block.text.trim())
+    .find(Boolean);
+}
+
+function queueOutboundImages(
+  toolResults: ToolResultMessage[],
+  chatJid: string,
+): void {
+  for (const toolResult of toolResults) {
+    const images = toolResult.content.filter(
+      (block): block is ImageContent => block.type === 'image',
+    );
+    if (images.length === 0) continue;
+    const caption = extractCaption(toolResult.content);
+    for (const image of images) {
+      writeIpcMediaMessage(chatJid, image, caption);
+    }
+  }
 }
 
 function getOneCliDummyApiKeyEnv(
@@ -260,6 +311,46 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
       });
       return {
         content: [{ type: 'text', text: 'Message sent.' }],
+        details: {},
+      };
+    },
+  };
+
+  const sendImageTool: ToolDefinition = {
+    name: 'send_image',
+    label: 'Send Image',
+    description:
+      'Send an image to the current user or group. Provide base64 image data and mime type.',
+    parameters: Type.Object({
+      data: Type.String({ description: 'Base64-encoded image data' }),
+      mimeType: Type.String({
+        description: 'Image MIME type such as image/png or image/jpeg',
+      }),
+      caption: Type.Optional(
+        Type.String({ description: 'Optional caption to send with the image' }),
+      ),
+    }),
+    execute: async (_toolCallId, params: any) => {
+      try {
+        Buffer.from(params.data, 'base64');
+      } catch {
+        return {
+          content: [{ type: 'text', text: 'Invalid base64 image data.' }],
+          isError: true,
+          details: {},
+        };
+      }
+      writeIpcMediaMessage(
+        input.chatJid,
+        {
+          type: 'image',
+          data: params.data,
+          mimeType: params.mimeType,
+        },
+        params.caption,
+      );
+      return {
+        content: [{ type: 'text', text: 'Image sent.' }],
         details: {},
       };
     },
@@ -570,6 +661,7 @@ function createNanoclawTools(input: ContainerInput): ToolDefinition[] {
 
   return [
     sendMessageTool,
+    sendImageTool,
     scheduleTaskTool,
     listTasksTool,
     taskMutationTool('pause_task', 'Pause a scheduled task.'),
@@ -887,6 +979,27 @@ async function main(): Promise<void> {
       ) {
         currentText += event.assistantMessageEvent.delta;
       }
+      if (event.type === 'turn_end') {
+        queueOutboundImages(event.toolResults, input.chatJid);
+      }
+      if (
+        event.type === 'tool_execution_end' &&
+        event.result &&
+        Array.isArray((event.result as { content?: unknown }).content)
+      ) {
+        const result = event.result as {
+          content: Array<TextContent | ImageContent>;
+        };
+        const images = result.content.filter(
+          (block): block is ImageContent => block.type === 'image',
+        );
+        if (images.length > 0) {
+          const caption = extractCaption(result.content);
+          for (const image of images) {
+            writeIpcMediaMessage(input.chatJid, image, caption);
+          }
+        }
+      }
     });
 
     let prompt = input.prompt;
@@ -936,7 +1049,10 @@ async function main(): Promise<void> {
         resultText = `Context compacted. Summary:\n\n${compaction.summary}`;
         currentText = resultText;
       } else {
-        await session.prompt(prompt);
+        await session.prompt(
+          prompt,
+          input.images ? { images: input.images } : undefined,
+        );
         resultText = currentText || null;
       }
 
