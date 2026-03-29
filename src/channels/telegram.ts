@@ -1,5 +1,5 @@
 import https from 'https';
-import { Api, Bot } from 'grammy';
+import { Api, Bot, InputFile } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -7,6 +7,9 @@ import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  DownloadedAttachment,
+  MessageAttachment,
+  NewMessage,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -39,6 +42,31 @@ async function sendTelegramMessage(
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
   }
+}
+
+async function downloadTelegramFile(
+  botToken: string,
+  api: { getFile: (fileId: string) => Promise<{ file_path?: string }> },
+  fileId: string,
+): Promise<DownloadedAttachment> {
+  const file = await api.getFile(fileId);
+  if (!file.file_path) {
+    throw new Error('Telegram file has no file_path');
+  }
+
+  const response = await fetch(
+    `https://api.telegram.org/file/bot${botToken}/${file.file_path}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to download Telegram file: ${response.status}`);
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const ext = file.file_path.split('.').pop()?.toLowerCase();
+  const mimeType =
+    ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+
+  return { bytes, mimeType };
 }
 
 export class TelegramChannel implements Channel {
@@ -201,7 +229,50 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      const caption = ctx.message.caption?.trim();
+      const photos = ctx.message.photo || [];
+      const largestPhoto = photos[photos.length - 1];
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content: caption ? `[Photo] ${caption}` : '[Photo]',
+        timestamp,
+        is_from_me: false,
+        attachments: largestPhoto
+          ? [
+              {
+                kind: 'image',
+                mimeType: 'image/jpeg',
+                fileId: largestPhoto.file_id,
+                caption,
+              },
+            ]
+          : undefined,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
@@ -237,6 +308,43 @@ export class TelegramChannel implements Channel {
         },
       });
     });
+  }
+
+  async downloadAttachment(
+    _message: NewMessage,
+    attachment: MessageAttachment,
+  ): Promise<DownloadedAttachment> {
+    if (!this.bot) {
+      throw new Error('Telegram bot not initialized');
+    }
+    if (attachment.kind !== 'image' || !attachment.fileId) {
+      throw new Error('Telegram attachment is missing fileId');
+    }
+    return downloadTelegramFile(
+      this.botToken,
+      this.bot.api as any,
+      attachment.fileId,
+    );
+  }
+
+  async sendImage(
+    jid: string,
+    image: Buffer,
+    _mimeType: string,
+    caption?: string,
+    threadId?: string,
+  ): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+
+    const numericId = jid.replace(/^tg:/, '');
+    const options = {
+      ...(caption ? { caption } : {}),
+      ...(threadId ? { message_thread_id: parseInt(threadId, 10) } : {}),
+    };
+    await this.bot.api.sendPhoto(numericId, new InputFile(image), options);
   }
 
   async sendMessage(
