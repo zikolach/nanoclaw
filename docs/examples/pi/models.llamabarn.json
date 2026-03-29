@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "llamabarn": {
+      "baseUrl": "http://localhost:2276/v1",
+      "api": "openai-completions",
+      "apiKey": "no-key",
+      "models": [
+        {
+          "id": "glm-4.7-flash-q4",
+          "reasoning": true,
+          "contextWindow": 64000
+        }
+      ]
+    }
+  }
+}

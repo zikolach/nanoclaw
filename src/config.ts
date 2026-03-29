@@ -6,9 +6,12 @@ import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
 const envConfig = readEnvFile([
+  'AGENT_RUNTIME',
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
+  'PI_AUTH_MODE',
+  'PI_CONTAINER_IMAGE',
   'TZ',
 ]);
 
@@ -41,8 +44,16 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
+export const AGENT_RUNTIME =
+  process.env.AGENT_RUNTIME || envConfig.AGENT_RUNTIME || 'claude';
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+export const PI_CONTAINER_IMAGE =
+  process.env.PI_CONTAINER_IMAGE ||
+  envConfig.PI_CONTAINER_IMAGE ||
+  'nanoclaw-agent-pi:latest';
+export const PI_AUTH_MODE =
+  process.env.PI_AUTH_MODE || envConfig.PI_AUTH_MODE || 'native';
 export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,

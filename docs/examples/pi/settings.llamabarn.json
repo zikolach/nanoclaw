@@ -1,0 +1,6 @@
+{
+  "lastChangelogVersion": "0.61.1",
+  "defaultProvider": "llamabarn",
+  "defaultModel": "glm-4.7-flash-q4",
+  "defaultThinkingLevel": "medium"
+}

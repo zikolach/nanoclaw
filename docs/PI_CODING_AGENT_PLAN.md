@@ -1,0 +1,760 @@
+# Pi coding agent integration plan
+
+## Goal
+
+Integrate [pi coding agent](https://www.npmjs.com/package/@mariozechner/pi-coding-agent) into NanoClaw without losing NanoClaw's core runtime guarantees:
+
+- per-group isolation
+- durable multi-turn sessions
+- scheduled task support
+- IPC-based host/container coordination
+- container-side customization
+- safe secret handling
+
+This document is a **design and migration plan**, not an implementation record.
+
+## Current repository state
+
+Before writing this plan, local Pi migration work was stashed, upstream `origin/main` was merged into local `main`, and the stashed work was reapplied.
+
+### What upstream changed
+
+Recent upstream changes materially affect a Pi migration:
+
+- NanoClaw now leans on **OneCLI** for credential injection into containers.
+- `src/credential-proxy.ts` was removed upstream.
+- `src/container-runner.ts` now configures containers around the OneCLI gateway model.
+- Core docs and setup/debug flows were updated.
+
+### What the local Pi migration attempt already changed
+
+The local work-in-progress attempted to:
+
+- replace Claude SDK dependencies in `container/agent-runner/package.json`
+- install `@mariozechner/pi-coding-agent` in `container/Dockerfile`
+- rewrite `container/agent-runner/src/index.ts` from Claude SDK `query()` to Pi SDK `createAgentSession()`
+- reintroduce a Pi-aware credential path using `PI_BASE_URL` and `PI_API_KEY`
+- add `.pi/` config files and shell scripts for local testing
+
+### Assessment of the current attempt
+
+The attempt is useful as exploration, but it is incomplete and not aligned with upstream yet.
+
+Main gaps:
+
+1. **Credential architecture conflict**
+   - upstream uses OneCLI
+   - local Pi branch reintroduced a custom credential proxy model
+
+2. **Session persistence not solved**
+   - the draft Pi code used `SessionManager.inMemory()`
+   - NanoClaw needs session continuity across container lifetimes
+
+3. **Resource loading is too minimal**
+   - the draft Pi code used a custom near-empty `ResourceLoader`
+   - that would skip most of Pi's native discovery for skills, prompts, extensions, and context files
+
+4. **Tooling parity is incomplete**
+   - draft code only wired basic tools
+   - NanoClaw-specific IPC behaviors still need a Pi-native integration strategy
+
+5. **Model/provider configuration is underspecified**
+   - the draft used direct runtime configuration rather than a stable Pi-native provider/model strategy
+
+## Non-goals
+
+This migration should **not**:
+
+- weaken group isolation
+- expose real host credentials directly to containers
+- require invasive forks of Pi internals
+- block future upstream NanoClaw merges behind a permanent hard fork
+
+## Recommended architectural direction
+
+## 1. Use Pi natively inside the container, not as a Claude drop-in
+
+Do not treat Pi as a thin replacement for the Claude SDK.
+
+Instead:
+
+- keep NanoClaw's host/container orchestration model
+- replace the container-side agent runtime with a Pi-native session layer
+- adapt NanoClaw's IPC and scheduling semantics to Pi concepts
+
+This avoids a fragile hybrid where NanoClaw still behaves as if the Claude SDK were underneath.
+
+## 2. Prefer Pi-native provider/model configuration over reviving the deleted proxy path
+
+Primary direction:
+
+- configure Pi through `.pi` settings and/or Pi provider configuration
+- use Pi-supported provider routing for Anthropic, OpenAI-compatible local models, or custom endpoints
+- only add a NanoClaw-specific proxy layer if there is a clearly proven gap that Pi provider configuration cannot cover
+
+Rationale:
+
+- aligns with Pi's documented extension/provider model
+- reduces conflict with upstream OneCLI-based NanoClaw changes
+- makes local-model support more natural
+
+## 3. Keep NanoClaw orchestration on the host
+
+The host should continue to own:
+
+- group routing
+- container lifecycle
+- idle timeout handling
+- IPC task files
+- output framing and parsing
+- per-group mount policy
+
+Pi should only replace the **container-side conversational engine**.
+
+## 4. Expose NanoClaw-specific capabilities as Pi-native tools/extensions
+
+Instead of preserving the old Claude/MCP structure by default, map NanoClaw runtime features into Pi-native tools and extensions where possible.
+
+Candidates:
+
+- send outbound message
+- schedule task
+- inspect group status
+- access task metadata
+- optionally bridge existing IPC commands through a compatibility layer during migration
+
+## Target architecture
+
+```text
+Host NanoClaw process
+  -> spawns isolated container
+  -> mounts group/project/ipc/session resources
+  -> passes runtime config
+
+Container runtime
+  -> Pi SDK session factory
+  -> Pi resource loader
+  -> Pi tools/extensions for NanoClaw integration
+  -> persistent session storage per group
+
+Model/provider layer
+  -> Pi provider configuration (.pi/models.json and settings)
+  -> optional custom Pi provider extension if needed
+```
+
+## Key design decisions to make before implementation
+
+## LLM / authentication architecture summary
+
+NanoClaw does not have the host process talk to the LLM directly. Instead, the host spawns an isolated container and the container-side agent runtime talks to the model provider.
+
+### Upstream / default Claude runtime
+
+Current upstream NanoClaw is oriented around **OneCLI-managed credential injection**:
+
+- the host builds container args in `src/container-runner.ts`
+- OneCLI applies container configuration via `onecli.applyContainerConfig(...)`
+- the containerized Claude runtime then authenticates through that configured path
+
+This replaces the older custom credential-proxy approach. The historical `src/credential-proxy.ts` file is no longer part of upstream `main`.
+
+### Experimental Pi runtime on this branch
+
+The Pi runtime currently uses a **Pi-native configuration model**, not the old custom proxy:
+
+1. **Local / custom provider mode**
+   - host passes `PI_PROVIDER`, `PI_MODEL`, `PI_BASE_URL`, and `PI_API_KEY`
+   - Pi runtime writes a temporary `models.json` dynamically
+   - container talks directly to the configured OpenAI-compatible endpoint
+
+2. **Built-in provider mode**
+   - host copies `~/.pi/agent/auth.json` into the group-scoped Pi agent directory
+   - that directory is mounted into the container
+   - Pi uses its normal auth storage and built-in provider handling (e.g. `openai-codex`)
+
+### Architectural consequence
+
+One of the remaining migration decisions is whether the long-term Pi runtime should:
+
+- continue using **Pi-native provider config and auth files**, or
+- be re-aligned with **OneCLI-based credential injection** for consistency with upstream NanoClaw
+
+The current branch proves that the Pi-native approach works. The long-term upstream architecture decision is still open.
+
+## Decision A: authentication path
+
+Choose one of these explicitly.
+
+### Option A1: OneCLI remains the only credential transport
+
+Use OneCLI to route requests and let Pi talk through that route.
+
+Pros:
+
+- closest to upstream NanoClaw direction
+- fewer custom moving parts
+- best long-term consistency with current NanoClaw secret-handling model
+
+Cons:
+
+- only good if OneCLI integrates cleanly with Pi's provider expectations
+- may be awkward for local OpenAI-compatible model servers
+- requires an explicit mapping from OneCLI-provided container config to Pi provider config
+
+### A1 implementation and verification plan
+
+### Proposed OneCLI-backed Pi architecture
+
+```mermaid
+flowchart LR
+    U[User message from channel] --> H[Host NanoClaw process]
+    H --> DB[(SQLite / group state)]
+    H --> CR[src/container-runner.ts]
+    CR --> OC[OneCLI SDK\napplyContainerConfig(...)]
+    CR --> C[Isolated Pi container]
+
+    subgraph Container[Pi runtime container]
+      PR[container/pi-agent-runner/src/index.ts]
+      PC[Runtime Pi config bootstrap\nPI_AUTH_MODE=onecli]
+      PS[Pi SessionManager\nper-group sessions]
+      PT[Pi-native NanoClaw tools]
+      PI[IPC loop\n/workspace/ipc]
+    end
+
+    C --> PR
+    PR --> PC
+    PR --> PS
+    PR --> PT
+    PR --> PI
+
+    OC -. injects env / files / gateway config .-> C
+    PC --> PM[Generated Pi provider config]
+    PM --> LLM[LLM provider via OneCLI-managed auth path]
+
+    PT --> IPCMSG[/IPC message and task files/]
+    IPCMSG --> H
+    H --> CH[Outbound channel router]
+```
+
+### Proposed auth/config decision tree
+
+```mermaid
+flowchart TD
+    A[AGENT_RUNTIME=pi] --> B{PI_AUTH_MODE}
+    B -->|onecli| C[Use OneCLI-applied container config]
+    B -->|native| D[Use PI_PROVIDER / PI_MODEL / PI_BASE_URL / PI auth file]
+
+    C --> E[Pi bootstrap inspects injected env/files/gateway]
+    E --> F[Materialize Pi provider config at runtime]
+    F --> G[Pi talks through OneCLI-backed auth path]
+
+    D --> H[Pi bootstrap writes native models/settings config]
+    H --> I[Pi talks directly to local/custom provider or built-in provider]
+```
+
+### Verification matrix for OneCLI mode
+
+| Layer             | What to verify                                       | Success signal                                                        |
+| ----------------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
+| OneCLI contract   | What `applyContainerConfig(...)` injects             | documented env/files/gateway contract                                 |
+| Pi bootstrap      | Pi can turn the OneCLI contract into provider config | first authenticated request succeeds                                  |
+| Conversation loop | multi-turn live IPC behavior                         | existing smoke test passes                                            |
+| Persistence       | session survives container restart                   | reopened session remembers prior context                              |
+| Tools             | NanoClaw IPC side effects                            | tool-created files appear in expected IPC paths                       |
+| Scheduler         | scheduled task prompt + script flow                  | `wakeAgent=true` / `wakeAgent=false` behavior matches current Pi path |
+| Compaction        | `/compact` against OneCLI-backed provider            | valid compaction summary returned                                     |
+
+#### Phase 1 — discover the OneCLI contract
+
+Goal: determine exactly what `onecli.applyContainerConfig(...)` injects and how a Pi container can consume it.
+
+Tasks:
+
+- inspect the final container args/env produced by `onecli.applyContainerConfig(...)`
+- determine whether OneCLI exposes:
+  - direct env vars
+  - mounted files
+  - a local proxy/gateway URL
+  - provider-specific metadata
+- document the minimum contract Pi must consume to authenticate successfully
+
+Acceptance criteria:
+
+- we can describe the OneCLI → container auth contract in a short table
+- we know whether Pi should use:
+  - a custom `PI_BASE_URL`, or
+  - a generated Pi `models.json`, or
+  - a Pi custom provider shim
+
+#### Phase 2 — add a OneCLI-backed Pi auth mode
+
+Goal: support Pi runtime with OneCLI-managed credentials while keeping the current Pi-native mode available for comparison.
+
+Tasks:
+
+- add an explicit auth mode switch, e.g.:
+  - `PI_AUTH_MODE=onecli|native`
+- in `src/container-runner.ts`, continue calling `onecli.applyContainerConfig(...)` for Pi containers
+- implement a Pi bootstrap path in `container/pi-agent-runner/src/index.ts` that:
+  - reads OneCLI-provided env/files
+  - materializes the corresponding Pi provider configuration at runtime
+  - avoids exposing raw host secrets outside the OneCLI contract
+- keep current native mode working for local/custom providers until OneCLI parity is proven
+
+Acceptance criteria:
+
+- with `AGENT_RUNTIME=pi` and `PI_AUTH_MODE=onecli`, the Pi container starts successfully
+- Pi can issue at least one authenticated request through the OneCLI-provided path
+- native mode still works unchanged for local `llamabarn` testing
+
+#### Phase 3 — verify conversational/runtime behavior
+
+Goal: prove that OneCLI-backed Pi works in the same long-lived NanoClaw runtime model as the current PoC.
+
+Tasks:
+
+- validate first-turn prompt execution
+- validate follow-up IPC message in same live container
+- validate persistent session reopen after container restart
+- validate `/compact` against the OneCLI-backed provider path
+- validate transcript logging still works
+
+Acceptance criteria:
+
+- the existing host/runtime smoke test passes in OneCLI mode
+- a restarted Pi session can answer based on prior state
+- `/compact` returns a valid summary in OneCLI mode
+
+#### Phase 4 — verify tool and scheduler flows end to end
+
+Goal: prove that NanoClaw-specific side effects still work with OneCLI-backed Pi.
+
+Tasks:
+
+- validate `send_message`
+- validate `schedule_task`
+- validate `list_tasks`
+- validate `update_task`
+- validate `pause_task`
+- validate `resume_task`
+- validate `cancel_task`
+- validate `register_group`
+- validate scheduled-task script execution with `wakeAgent=true|false`
+
+Acceptance criteria:
+
+- each tool completes successfully through the host/runtime path
+- IPC files are written exactly where NanoClaw expects them
+- no tool behavior depends on native Pi auth mode
+
+#### Phase 5 — harden and decide default direction
+
+Goal: decide whether OneCLI-backed Pi is good enough to become the preferred auth path.
+
+Tasks:
+
+- compare OneCLI mode vs native Pi mode on:
+  - security
+  - setup simplicity
+  - local-model support
+  - reliability
+  - future upstream mergeability
+- document any gaps where native mode is still required
+- decide whether to:
+  - make OneCLI the default for Pi, or
+  - keep dual-mode support
+
+Acceptance criteria:
+
+- explicit recommendation captured in this plan
+- setup docs updated for whichever mode is preferred
+- remaining blockers reduced to a small, enumerated list
+
+### Option A2: Pi-native provider config is primary
+
+Use Pi provider/model config directly inside the container.
+
+Pros:
+
+- cleaner Pi integration
+- best for local/OpenAI-compatible providers
+- simpler model selection story
+
+Cons:
+
+- requires careful secret-handling design
+- may diverge from current upstream OneCLI assumptions
+
+**Recommendation:** start with **A2** for the Pi path, while keeping the design open to A1 if OneCLI proves to be a clean fit.
+
+## Decision B: session persistence strategy
+
+Pi sessions must be durable across container restarts.
+
+Required outcome:
+
+- one durable session namespace per NanoClaw group
+- host can continue a prior session by ID or by group-local default
+- session persistence must not allow cross-group access
+
+Recommended direction:
+
+- store Pi session files in a per-group path under NanoClaw-managed session storage
+- use Pi `SessionManager.create(...)`, `continueRecent(...)`, or `open(...)` against that per-group path
+- avoid `SessionManager.inMemory()` except in tests
+
+## Decision C: resource loading strategy
+
+Recommended direction:
+
+- use Pi `DefaultResourceLoader`
+- set `cwd` to `/workspace/group`
+- provide a group-specific `agentDir` inside mounted group-scoped session storage
+- explicitly mount and load project `.pi` only when intended
+- verify what context files are discovered from:
+  - `/workspace/group`
+  - `/workspace/project`
+  - mounted `.pi`
+  - injected AGENTS/context files
+
+Avoid a handcrafted minimal `ResourceLoader` unless there is a proven need.
+
+## Decision D: NanoClaw IPC integration shape
+
+Two realistic approaches:
+
+### Option D1: compatibility bridge first
+
+Keep the existing IPC/MCP-like behavior and wrap it for Pi.
+
+Pros:
+
+- lower initial migration risk
+- easier parity testing
+
+Cons:
+
+- preserves legacy abstractions longer
+
+### Option D2: Pi-native tools first
+
+Rebuild NanoClaw container actions as Pi custom tools/extensions.
+
+Pros:
+
+- cleaner long-term architecture
+- better alignment with Pi docs
+
+Cons:
+
+- more design work up front
+
+**Recommendation:** use **D1 for the first milestone**, then move toward **D2** after parity is reached.
+
+## Functional parity checklist
+
+The Pi path is not complete until all of these work:
+
+- [x] first-turn prompt execution
+- [x] follow-up turns delivered over IPC
+- [x] host idle timeout and close sentinel behavior
+- [x] scheduled task execution
+- [x] scheduled task `script` pre-processing
+- [x] per-group session continuity across container restarts
+- [x] outbound message/tool actions
+- [ ] full group/project/global context isolation review
+- [~] transcript parity (basic JSONL transcript archive implemented, Claude-style archive format still missing)
+- [~] compaction parity (manual `/compact` forwarding implemented, broader parity/documentation still pending)
+- [x] Pi container build + startup reliability for the PoC
+
+## Migration progress snapshot
+
+Current branch status: **experimental Pi runtime is working and validated for key flows, but is not yet the default production runtime**.
+
+### Implemented on `feat/pi-runtime-poc`
+
+- [x] separate experimental Pi container image and build script
+- [x] runtime switch with `AGENT_RUNTIME=pi`
+- [x] local/custom provider mode via `PI_BASE_URL`
+- [x] built-in `openai-codex` provider mode via mounted Pi auth
+- [x] persistent Pi sessions stored per group
+- [x] long-lived container loop waiting on NanoClaw IPC input
+- [x] scheduled task prompt execution
+- [x] scheduled task pre-script execution with `wakeAgent`
+- [x] Pi-native NanoClaw tools for messaging and task management
+- [x] basic transcript JSONL append in `groups/<name>/conversations/pi-transcript.jsonl`
+- [x] manual `/compact` forwarding to Pi session compaction
+- [x] host/runtime end-to-end smoke test script
+- [x] smoke-test cleanup/orphan cleanup hardening
+
+### Confidence level by area
+
+| Area                            | Status  | Notes                                                                |
+| ------------------------------- | ------- | -------------------------------------------------------------------- |
+| Container boot                  | Good    | Pi image builds and runs reliably in local testing                   |
+| Local model connectivity        | Good    | Validated with llamabarn/OpenAI-compatible endpoint                  |
+| Codex connectivity              | Good    | Validated with built-in `openai-codex` provider using Pi auth        |
+| Session persistence             | Good    | Reopen by returned session file path works                           |
+| Multi-turn IPC loop             | Good    | Follow-up prompts in same live container work                        |
+| Scheduled tasks                 | Good    | Basic task execution + script pre-processing works                   |
+| Pi-native tools                 | Partial | Core message/task/group tools implemented; parity still incomplete   |
+| Transcript behavior             | Partial | JSONL logging exists; Claude-style archive format does not           |
+| Compaction behavior             | Partial | Manual `/compact` works; broader parity/documentation still needed   |
+| Automated coverage              | Partial | Host/runtime smoke test exists; broader test matrix still needed     |
+| Upstream architecture alignment | Open    | Long-term auth/resource-loader approach still needs a final decision |
+
+### Still pending
+
+- [ ] confirm broader end-to-end host integration in the normal NanoClaw message loop
+- [ ] verify all task mutation paths end to end (`update_task`, `pause_task`, `resume_task`, `cancel_task`)
+- [ ] review context/resource loading strategy against Pi `DefaultResourceLoader`
+- [ ] decide final auth architecture vs OneCLI
+- [ ] replace or document missing Claude-specific compaction/archive behavior
+- [ ] add more automated coverage beyond the smoke test (timeouts, failures, main-group flows, multiple groups)
+
+### Current assessment
+
+- **On track for an experimental Pi runtime**: yes
+- **Ready to replace the default Claude runtime**: not yet
+
+The migration has passed the "proof of viability" stage. The remaining work is mostly around architecture hardening, broader parity, and test coverage rather than basic feasibility.
+
+## Implementation phases
+
+## Phase 0 — freeze and document the exploratory work
+
+Deliverables:
+
+- this plan document
+- a list of exploratory files and diffs
+- a clean conflict-free baseline branch
+
+Notes:
+
+- do not keep half-migrated runtime files in a deployable state without feature flags
+- preserve exploratory local files for reference, but do not rely on them as final design
+
+## Phase 1 — prove the credential/model path
+
+Goal:
+
+Establish a minimal containerized Pi session that can answer a single prompt using the chosen provider strategy.
+
+Tasks:
+
+- decide between OneCLI-backed Pi or Pi-native provider configuration
+- define required env vars and mounted config files
+- verify a container can create a Pi session and complete a single response
+- document how model selection works
+
+Exit criteria:
+
+- one reproducible single-turn container test passes
+
+## Phase 2 — persistent sessions per group
+
+Goal:
+
+Replace in-memory Pi sessions with durable group-scoped sessions.
+
+Tasks:
+
+- define on-disk session directory layout
+- wire Pi `SessionManager` to group-local storage
+- map NanoClaw `sessionId` to Pi session semantics
+- verify resume after container restart
+
+Exit criteria:
+
+- a second container process can continue the same group conversation
+
+## Phase 3 — resource loading and context behavior
+
+Goal:
+
+Make Pi load the right context, skills, and settings in a NanoClaw group container.
+
+Tasks:
+
+- use `DefaultResourceLoader`
+- define `cwd` and `agentDir`
+- test loading of:
+  - group-local context files
+  - project-level `.pi`
+  - NanoClaw container skills if still needed
+- document any deliberate exclusions
+
+Exit criteria:
+
+- Pi sees the expected context and no unintended cross-group context
+
+## Phase 4 — IPC loop integration
+
+Goal:
+
+Restore NanoClaw's multi-turn container lifecycle with Pi.
+
+Tasks:
+
+- keep NanoClaw output framing markers
+- adapt Pi events to current host output parsing
+- support repeated prompt/wait/prompt cycles
+- preserve close sentinel behavior
+- verify no duplicate/partial final outputs
+
+Exit criteria:
+
+- host can run a normal multi-turn chat with Pi in a container
+
+## Phase 5 — scheduled tasks and scripts
+
+Goal:
+
+Restore scheduled task semantics.
+
+Tasks:
+
+- preserve task script execution before agent wake-up
+- keep `wakeAgent` contract
+- inject script output into prompt in a stable format
+- test no-op scheduled tasks vs wake-agent tasks
+
+Exit criteria:
+
+- scheduled tasks behave the same as the current runtime from the host's perspective
+
+## Phase 6 — NanoClaw tools integration
+
+Goal:
+
+Expose NanoClaw-specific capabilities to Pi.
+
+Tasks:
+
+- identify all container-side actions currently available through MCP/IPC
+- implement a compatibility bridge or Pi custom tools
+- add tests for each tool path
+
+Exit criteria:
+
+- container agent can perform NanoClaw-specific actions required for daily use
+
+## Phase 7 — compaction, transcripts, and migration polish
+
+Goal:
+
+Handle the remaining Claude-specific behaviors that do not have a direct Pi equivalent.
+
+Tasks:
+
+- review current transcript archiving logic
+- decide whether to:
+  - reimplement around Pi session files/events, or
+  - adopt Pi-native session/compaction behavior and update expectations
+- document differences from Claude-based behavior
+
+Exit criteria:
+
+- long-running sessions are operationally safe and behavior is documented
+
+## Phase 8 — rollout strategy
+
+Goal:
+
+Avoid breaking existing users while introducing Pi support.
+
+Recommended rollout:
+
+1. add a runtime switch, e.g. `AGENT_RUNTIME=claude|pi`
+2. keep Claude as the default until Pi reaches parity
+3. test Pi on one group or one local installation first
+4. only change defaults after parity and docs are complete
+
+## Proposed file-level work map
+
+### Host-side
+
+- `src/container-runner.ts`
+  - runtime selection
+  - container env/config injection for Pi
+  - per-group session/resource mounts
+
+- `src/index.ts`
+  - likely minimal changes unless runtime selection must surface here
+
+- `src/ipc.ts`
+  - verify compatibility only; avoid broad changes unless Pi requires them
+
+### Container-side
+
+- `container/agent-runner/src/index.ts`
+  - split into:
+    - NanoClaw wrapper layer
+    - Pi session bootstrap
+    - event/output adapter
+
+- `container/agent-runner/package.json`
+  - Pi dependencies
+
+- `container/Dockerfile`
+  - Pi runtime install and config layout
+
+### Config/docs/tests
+
+- project `.pi` config strategy
+- provider/model configuration docs
+- integration smoke tests
+- session persistence tests
+- scheduled task tests
+
+## Risks
+
+1. **upstream drift**
+   - NanoClaw upstream is evolving quickly around OneCLI and runtime setup
+
+2. **session model mismatch**
+   - Pi sessions are not a drop-in replacement for Claude SDK session handling
+
+3. **context loading surprises**
+   - incorrect `cwd`/`agentDir` or mounts could silently change behavior
+
+4. **tool parity gaps**
+   - a naive Pi migration may lose essential NanoClaw actions
+
+5. **local model quirks**
+   - OpenAI-compatible servers often require provider `compat` tuning in Pi
+
+## Acceptance criteria for calling the migration done
+
+A Pi runtime can be considered ready when:
+
+- NanoClaw can run Pi in a container for a real group conversation
+- session continuity works across restarts
+- scheduled tasks work
+- required NanoClaw tools work
+- secrets are not exposed directly to containers beyond the chosen acceptable runtime contract
+- the implementation can be rebased on upstream without carrying a permanent invasive fork
+
+## Immediate next steps
+
+1. clean up the exploratory branch into a non-broken baseline
+2. choose the credential/model path
+3. implement a minimal single-turn Pi container proof of concept
+4. add persistent sessions
+5. restore IPC multi-turn behavior
+6. restore scheduled tasks
+7. restore NanoClaw-specific tools
+8. add runtime flag and rollout plan
+
+## Appendix: exploratory local artifacts worth reviewing
+
+These local artifacts from the initial migration attempt may still be useful as references:
+
+- `MIGRATION_TO_PI.md`
+- `.pi/settings.json`
+- `container/.pi/agent/models.json`
+- `container/.pi/agent/settings.json`
+- `test-pi-migration.sh`
+- `test-docker-run.sh`
+
+They should be treated as exploration notes, not final implementation.

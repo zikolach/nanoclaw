@@ -1,0 +1,20 @@
+{
+  "name": "nanoclaw-pi-agent-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Minimal Pi container-side runner for NanoClaw proof of concept",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "latest",
+    "@sinclair/typebox": "^0.34.41",
+    "cron-parser": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
+  }
+}
