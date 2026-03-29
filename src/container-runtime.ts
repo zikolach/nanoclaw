@@ -10,6 +10,17 @@ import { logger } from './logger.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
+/** CLI args needed to pin the container platform explicitly. */
+export function containerPlatformArgs(): string[] {
+  // Some Docker Desktop setups default to linux/amd64 globally for cloud builds.
+  // NanoClaw should force Apple Silicon locally so container runs/builds don't
+  // inherit that default and fail against arm64-only images.
+  if (os.platform() === 'darwin' && os.arch() === 'arm64') {
+    return ['--platform', 'linux/arm64'];
+  }
+  return [];
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly
