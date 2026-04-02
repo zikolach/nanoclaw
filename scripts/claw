@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 # ── Globals ─────────────────────────────────────────────────────────────────
@@ -222,7 +223,8 @@ def run_container(runtime: str, image: str, payload: dict,
                   folder: str | None = None, is_main: bool = False,
                   timeout: int = 300, runtime_mode: str = "claude",
                   extra_env: dict | None = None) -> None:
-    cmd = [runtime, "run", "-i", "--rm"]
+    container_name = f"claw-{int(time.time())}-{os.getpid()}"
+    cmd = [runtime, "run", "-i", "--rm", "--name", container_name]
     if runtime == "docker" and sys.platform == "darwin" and os.uname().machine == "arm64":
         cmd += ["--platform", "linux/arm64"]
     if folder:
@@ -248,6 +250,17 @@ def run_container(runtime: str, image: str, payload: dict,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+     
+    def cleanup_container() -> None:
+        try:
+            subprocess.run(
+                [runtime, "rm", "-f", container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
     dbg(f"container pid: {proc.pid}")
 
     # Write JSON payload and close stdin
@@ -286,6 +299,8 @@ def run_container(runtime: str, image: str, payload: dict,
                         proc.kill()
                 except ProcessLookupError:
                     pass
+                finally:
+                    cleanup_container()
                 return
 
     t_err = threading.Thread(target=stream_stderr, daemon=True)
@@ -299,11 +314,13 @@ def run_container(runtime: str, image: str, payload: dict,
         t_out.join(timeout=2)
         if not done.is_set():
             proc.kill()
+            cleanup_container()
             sys.exit(f"error: container timed out after {timeout}s (no output sentinel received)")
 
     t_err.join(timeout=5)
     t_out.join(timeout=5)
     proc.wait()
+    cleanup_container()
     dbg(f"container done (rc={proc.returncode}), {len(stdout_lines)} stdout lines")
     stdout = "\n".join(stdout_lines)
 

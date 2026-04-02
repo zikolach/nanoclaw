@@ -805,6 +805,31 @@ describe('TelegramChannel', () => {
       );
     });
 
+    it('prefers splitting on newline boundaries for long messages', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const first = 'a'.repeat(3000);
+      const second = 'b'.repeat(1500);
+      const longText = `${first}\n${second}`;
+      await channel.sendMessage('tg:100200300', longText);
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+      expect(currentBot().api.sendMessage).toHaveBeenNthCalledWith(
+        1,
+        '100200300',
+        first,
+        { parse_mode: 'Markdown' },
+      );
+      expect(currentBot().api.sendMessage).toHaveBeenNthCalledWith(
+        2,
+        '100200300',
+        second,
+        { parse_mode: 'Markdown' },
+      );
+    });
+
     it('sends exactly one message at 4096 characters', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
